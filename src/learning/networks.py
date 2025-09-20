@@ -374,7 +374,3 @@ def test_networks():
     print(f"   Value range: [{values.min().item():.3f}, {values.max().item():.3f}]")
     
     print("\nAll networks tested successfully!")
-
-
-if __name__ == "__main__":
-    test_networks()
