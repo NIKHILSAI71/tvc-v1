@@ -15,7 +15,7 @@ from typing import Optional, Dict, Any
 from pathlib import Path
 
 from src.dynamics.plant import TVCParameters
-from src.control.lqr import LQRParameters
+from src.control.mpc import MPCParameters
 from src.control.safety import SafetyParameters
 from src.learning.evolution import EvolutionParameters
 from src.learning.ppo import PPOParameters
@@ -27,7 +27,7 @@ class ExperimentConfig:
     
     # Component configurations
     plant: TVCParameters
-    lqr: Optional[LQRParameters] = None
+    mpc: Optional[MPCParameters] = None
     safety: Optional[SafetyParameters] = None
     evolution: Optional[EvolutionParameters] = None
     ppo: Optional[PPOParameters] = None
@@ -59,11 +59,15 @@ def create_default_config() -> ExperimentConfig:
         max_angular_rate=6.28    # 2π rad/s
     )
     
-    # LQR parameters
-    lqr = LQRParameters(
+    # MPC parameters (drop-in replacement for LQR)
+    mpc = MPCParameters(
         Q=np.diag([100.0, 10.0]),
         R=1.0,
-        clg_gamma=2.0
+        N=20,
+        dt=0.01,
+        du_rate_limit=True,
+        warm_start=True,
+        terminal_lqr=True,
     )
     
     # Safety parameters
@@ -95,7 +99,7 @@ def create_default_config() -> ExperimentConfig:
     
     return ExperimentConfig(
         plant=plant,
-        lqr=lqr,
+        mpc=mpc,
         safety=safety,
         evolution=evolution,
         ppo=ppo,
@@ -127,19 +131,32 @@ def load_config(filepath: str) -> ExperimentConfig:
     
     # Reconstruct dataclass objects
     plant = TVCParameters(**config_dict['plant'])
-    lqr = LQRParameters(**config_dict['lqr'])
+    # Support both 'mpc' and legacy 'lqr' keys
+    mpc_cfg = config_dict.get('mpc', None)
+    if mpc_cfg is None and 'lqr' in config_dict:
+        # Map LQR config to MPCParameters fields where possible
+        legacy = config_dict['lqr'] or {}
+        mapped = {
+            'Q': legacy.get('Q', [[100.0, 0.0], [0.0, 10.0]]),
+            'R': legacy.get('R', 1.0),
+        }
+        mpc = MPCParameters(Q=np.array(mapped['Q']), R=float(mapped['R']))
+    elif mpc_cfg is not None:
+        mpc = MPCParameters(**mpc_cfg)
+    else:
+        mpc = MPCParameters()
     safety = SafetyParameters(**config_dict['safety'])
     evolution = EvolutionParameters(**config_dict['evolution'])
     ppo = PPOParameters(**config_dict['ppo'])
     simulation = config_dict.get('simulation', None)
     
     # Remove component configs from dict
-    for key in ['plant', 'lqr', 'safety', 'evolution', 'ppo', 'simulation']:
+    for key in ['plant', 'lqr', 'mpc', 'safety', 'evolution', 'ppo', 'simulation']:
         config_dict.pop(key)
     
     return ExperimentConfig(
         plant=plant,
-        lqr=lqr,
+        mpc=mpc,
         safety=safety,
         evolution=evolution,
         ppo=ppo,
@@ -153,15 +170,15 @@ def create_experiment_configs() -> Dict[str, ExperimentConfig]:
     
     configs = {}
     
-    # 1. Baseline experiment (LQR only)
+    # 1. Baseline experiment (MPC only)
     baseline = create_default_config()
-    baseline.experiment_name = "baseline_lqr"
+    baseline.experiment_name = "baseline_mpc"
     baseline.use_safety_filter = False
     configs["baseline"] = baseline
     
-    # 2. LQR with safety filter
+    # 2. MPC with safety filter
     lqr_safe = create_default_config()
-    lqr_safe.experiment_name = "lqr_with_safety"
+    lqr_safe.experiment_name = "mpc_with_safety"
     lqr_safe.use_safety_filter = True
     configs["lqr_safe"] = lqr_safe
     
