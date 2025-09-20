@@ -11,14 +11,17 @@ import yaml
 import numpy as np
 import os
 from dataclasses import dataclass, asdict
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, TYPE_CHECKING
 from pathlib import Path
 
 from src.dynamics.plant import TVCParameters
 from src.control.mpc import MPCParameters
 from src.control.safety import SafetyParameters
-from src.learning.evolution import EvolutionParameters
-from src.learning.ppo import PPOParameters
+
+# Avoid circular import: only import learning parameters for type checking
+if TYPE_CHECKING:
+    from src.learning.evolution import EvolutionParameters
+    from src.learning.ppo import PPOParameters
 
 
 class ConfigObject:
@@ -44,8 +47,8 @@ class ExperimentConfig:
     plant: TVCParameters
     mpc: Optional[MPCParameters] = None
     safety: Optional[SafetyParameters] = None
-    evolution: Optional[EvolutionParameters] = None
-    ppo: Optional[PPOParameters] = None
+    evolution: Optional["EvolutionParameters"] = None
+    ppo: Optional["PPOParameters"] = None
     simulation: Optional[Any] = None  # MuJoCoSimParams - avoiding circular import
     
     # Experiment settings
@@ -63,6 +66,10 @@ class ExperimentConfig:
 def create_default_config() -> ExperimentConfig:
     """Create default configuration for TVC experiments"""
     
+    # Lazy imports to avoid circular dependencies during module import
+    from src.learning.evolution import EvolutionParameters
+    from src.learning.ppo import PPOParameters
+
     # Plant parameters
     plant = TVCParameters(
         mass=1.0,
@@ -141,6 +148,10 @@ def save_config(config: ExperimentConfig, filepath: str):
 def load_config(filepath: str) -> ExperimentConfig:
     """Load configuration from YAML file"""
     
+    # Lazy imports to avoid circular dependencies during module import
+    from src.learning.evolution import EvolutionParameters
+    from src.learning.ppo import PPOParameters
+
     with open(filepath, 'r') as f:
         config_dict = yaml.safe_load(f)
     
@@ -183,6 +194,10 @@ def load_config(filepath: str) -> ExperimentConfig:
 def create_experiment_configs() -> Dict[str, ExperimentConfig]:
     """Create predefined experiment configurations"""
     
+    # Lazy imports to avoid circular dependencies during module import
+    from src.learning.evolution import EvolutionParameters
+    from src.learning.ppo import PPOParameters
+
     configs = {}
     
     # 1. Baseline experiment (MPC only)
