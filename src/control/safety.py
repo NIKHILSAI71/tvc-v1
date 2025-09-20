@@ -418,7 +418,3 @@ def test_cbf_qp_filter():
     
     # Print final diagnostics
     print(f"\nFinal diagnostics: {safety_filter.get_diagnostics()}")
-
-
-if __name__ == "__main__":
-    test_cbf_qp_filter()
