@@ -1,0 +1,355 @@
+"""
+Production-Ready TVC Training Configuration
+
+This configuration integrates all the comprehensive enhancements for real-world
+TVC rocket control system training with maximum performance and accuracy.
+
+Author: Enhanced by GitHub Copilot (God Mode)
+"""
+
+# Enhanced TVC Training Configuration - Production Ready
+# Integrates all improvements: 200Hz control, comprehensive scenarios,
+# curriculum learning, performance optimization, and advanced tracking
+
+experiment_name: "tvc_real_world_comprehensive_v2"
+output_dir: "./results/production_comprehensive"
+
+# =============================================================================
+# REAL-WORLD SIMULATION PARAMETERS (200Hz Control)
+# =============================================================================
+simulation:
+  # High-frequency control matching real TVC systems
+  control_frequency: 200  # Hz (SpaceX Falcon 9 level)
+  timestep: 0.005  # 200Hz = 0.005s timestep
+  max_episode_length: 1000  # 5 seconds at 200Hz
+  
+  # Enhanced actuator dynamics
+  actuator_bandwidth: 50  # Hz (improved from 20Hz)
+  actuator_delay: 0.01  # seconds
+  actuator_noise_std: 0.001  # rad
+  
+  # Realistic physics effects
+  enable_fuel_consumption: true
+  enable_mass_variation: true
+  enable_propellant_sloshing: true
+  enable_atmospheric_effects: true
+  enable_sensor_noise: true
+  enable_thrust_variations: true
+
+# =============================================================================
+# PLANT PARAMETERS (Realistic TVC System)
+# =============================================================================
+plant:
+  # Vehicle properties (Falcon 9 inspired)
+  mass: 549000  # kg (full fuel)
+  dry_mass: 25600  # kg (empty)
+  moment_of_inertia: 12500000  # kg⋅m²
+  length: 70  # m (distance from CoM to engines)
+  
+  # Thrust properties
+  nominal_thrust: 7607000  # N (9 Merlin 1D engines)
+  max_thrust: 8227000  # N
+  min_thrust: 1520000  # N (20% throttle)
+  
+  # Actuator limits
+  max_gimbal_angle: 0.087  # ±5 degrees (typical for Merlin)
+  max_gimbal_rate: 0.175  # ±10 deg/s
+  
+  # Environment
+  gravity: 9.80665  # m/s² (standard gravity)
+  
+  # Safety margins
+  max_angle: 0.349  # ±20 degrees
+  max_angular_rate: 0.524  # ±30 deg/s
+  
+  # Disturbances and noise
+  disturbance_torque_std: 50000  # N⋅m
+  sensor_noise_std: 0.0017  # 0.1 degrees
+  
+  # Real-world effects
+  fuel_consumption_rate: 2500  # kg/s (9 engines)
+  sloshing_frequency: 0.5  # Hz
+  sloshing_damping: 0.1
+  atmospheric_density: 1.225  # kg/m³ (sea level)
+  drag_coefficient: 0.3
+
+# =============================================================================
+# COMPREHENSIVE TRAINING SCENARIOS
+# =============================================================================
+training:
+  # Use comprehensive scenario system
+  use_comprehensive_scenarios: true
+  scenario_generator: "comprehensive"
+  
+  # Curriculum learning
+  enable_curriculum: true
+  curriculum_type: "adaptive"
+  initial_difficulty: 0.2
+  max_difficulty: 0.9
+  difficulty_increase_rate: 0.05
+  success_threshold: 0.8
+  rollback_threshold: 0.4
+  
+  # Training phases
+  total_episodes: 100000
+  phase_1_episodes: 30000  # Easy scenarios
+  phase_2_episodes: 30000  # Mixed easy/medium
+  phase_3_episodes: 25000  # Medium/hard
+  phase_4_episodes: 15000  # All scenarios, hard focus
+  
+  # Scenario weights (for phase 4)
+  scenario_weights:
+    basic_hovering: 0.10
+    moderate_hovering: 0.12
+    disturbance_rejection: 0.15
+    launch_phase: 0.13
+    high_dynamics: 0.12
+    wind_rejection: 0.10
+    landing_phase: 0.08
+    engine_out: 0.06
+    precision_landing: 0.08
+    emergency_recovery: 0.06
+
+# =============================================================================
+# LEARNING ALGORITHMS
+# =============================================================================
+algorithms:
+  # PPO (Primary)
+  ppo:
+    enabled: true
+    learning_rate: 3.0e-4
+    batch_size: 256
+    mini_batch_size: 64
+    epochs: 10
+    clip_ratio: 0.2
+    entropy_coef: 0.01
+    value_coef: 0.5
+    max_grad_norm: 0.5
+    gamma: 0.99
+    gae_lambda: 0.95
+    
+    # Network architecture
+    hidden_sizes: [256, 256, 128]
+    activation: "tanh"
+    use_layer_norm: true
+    
+  # Evolution (Secondary)
+  evolution:
+    enabled: true
+    population_size: 100
+    generations: 500
+    mutation_rate: 0.1
+    crossover_rate: 0.7
+    elite_ratio: 0.1
+    sigma: 0.02
+    
+  # Hybrid training
+  use_hybrid: true
+  hybrid_ratio: 0.7  # 70% PPO, 30% Evolution
+
+# =============================================================================
+# PERFORMANCE OPTIMIZATION
+# =============================================================================
+performance:
+  # Vectorized environments
+  use_vectorized_env: true
+  num_parallel_envs: 16
+  num_workers: 8
+  
+  # High-performance settings
+  target_steps_per_second: 8000
+  use_gpu_acceleration: true
+  use_jit_compilation: true
+  use_memory_pooling: true
+  batch_processing: true
+  
+  # Memory optimization
+  trajectory_buffer_size: 100000
+  state_compression: false
+  use_single_precision: false
+  
+  # Parallel processing
+  use_multiprocessing: true
+  prefetch_data: true
+  async_evaluation: true
+
+# =============================================================================
+# ADVANCED TRACKING AND MONITORING
+# =============================================================================
+tracking:
+  # Experiment tracking
+  use_wandb: true
+  wandb_project: "tvc_rocket_control_production"
+  wandb_entity: "aerospace_ai"
+  
+  # Logging frequencies
+  log_frequency: 100  # steps
+  save_frequency: 5000  # steps
+  eval_frequency: 2500  # steps
+  video_frequency: 10000  # steps
+  
+  # Monitoring
+  track_gradients: true
+  track_weights: false
+  track_performance: true
+  track_scenarios: true
+  
+  # Hyperparameter optimization
+  enable_hpo: false  # Enable for initial tuning runs
+  hpo_trials: 100
+  hpo_timeout: 7200  # 2 hours
+  
+  # Metrics to track
+  primary_metric: "success_rate"
+  secondary_metrics:
+    - "mean_episode_reward"
+    - "settling_time"
+    - "rms_angle_error"
+    - "safety_violations"
+    - "fuel_efficiency"
+
+# =============================================================================
+# EVALUATION FRAMEWORK
+# =============================================================================
+evaluation:
+  # Comprehensive evaluation
+  use_monte_carlo: true
+  num_monte_carlo_runs: 1000
+  confidence_level: 0.95
+  
+  # Test scenarios
+  evaluation_scenarios:
+    - "basic_hovering"
+    - "moderate_hovering"
+    - "disturbance_rejection"
+    - "launch_phase"
+    - "high_dynamics"
+    - "wind_rejection"
+    - "landing_phase"
+    - "engine_out"
+    - "precision_landing"
+    - "emergency_recovery"
+  
+  # Performance criteria
+  success_criteria:
+    max_angle_error: 0.087  # 5 degrees
+    max_rate_error: 0.175  # 10 deg/s
+    settling_time: 3.0  # seconds
+    overshoot: 0.2  # 20%
+    steady_state_error: 0.017  # 1 degree
+  
+  # Safety criteria
+  safety_criteria:
+    max_safe_angle: 0.349  # 20 degrees
+    max_safe_rate: 0.524  # 30 deg/s
+    min_fuel_margin: 0.1  # 10%
+    max_control_effort: 0.087  # 5 degrees gimbal
+
+# =============================================================================
+# SAFETY AND RELIABILITY
+# =============================================================================
+safety:
+  # CLF-CBF safety filters
+  use_safety_filter: true
+  safety_factor: 1.2
+  backup_controller: "lqr"
+  
+  # Emergency protocols
+  enable_emergency_stop: true
+  emergency_angle_limit: 0.436  # 25 degrees
+  emergency_rate_limit: 0.698  # 40 deg/s
+  
+  # Fault tolerance
+  handle_actuator_faults: true
+  handle_sensor_faults: true
+  fault_detection_threshold: 3.0  # sigma
+  
+  # Verification
+  formal_verification: false  # Enable for critical applications
+  runtime_monitoring: true
+  anomaly_detection: true
+
+# =============================================================================
+# HARDWARE ACCELERATION (Optional)
+# =============================================================================
+hardware:
+  # GPU settings
+  use_gpu: true
+  gpu_memory_fraction: 0.8
+  mixed_precision: true
+  
+  # Multi-GPU (if available)
+  use_multi_gpu: false
+  gpu_devices: [0]
+  
+  # CPU optimization
+  num_cpu_cores: 16
+  cpu_affinity: true
+  numa_optimization: false
+
+# =============================================================================
+# OUTPUT AND REPORTING
+# =============================================================================
+output:
+  # Results directory structure
+  create_timestamped_dirs: true
+  save_models: true
+  save_trajectories: true
+  save_videos: true
+  save_plots: true
+  
+  # Report generation
+  generate_pdf_report: true
+  generate_html_dashboard: true
+  include_code_snapshot: true
+  
+  # Data formats
+  trajectory_format: "hdf5"
+  metrics_format: "json"
+  plots_format: "png"
+  videos_format: "mp4"
+
+# =============================================================================
+# REPRODUCIBILITY
+# =============================================================================
+reproducibility:
+  # Random seeds
+  random_seed: 42
+  numpy_seed: 42
+  torch_seed: 42
+  
+  # Environment
+  deterministic_ops: true
+  benchmark_mode: false
+  
+  # Version tracking
+  track_git_commit: true
+  track_dependencies: true
+  save_environment_info: true
+
+# =============================================================================
+# ADVANCED FEATURES
+# =============================================================================
+advanced:
+  # Domain randomization
+  use_domain_randomization: true
+  randomization_strength: 0.1
+  
+  # Transfer learning
+  use_pretrained_models: false
+  pretrained_model_path: null
+  
+  # Multi-task learning
+  multi_task_scenarios: false
+  
+  # Meta-learning
+  use_meta_learning: false
+  meta_learning_algorithm: "maml"
+  
+  # Imitation learning
+  use_expert_demonstrations: false
+  expert_data_path: null
+  
+  # Sim-to-real transfer
+  enable_sim2real: false
+  reality_gap_compensation: false
