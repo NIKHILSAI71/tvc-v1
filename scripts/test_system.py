@@ -19,8 +19,8 @@ import sys
 import time
 from pathlib import Path
 
-# Add src to path
-sys.path.append(str(Path(__file__).parent / "src"))
+# Add project root to path so 'src' is importable
+sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 def test_imports():
     """Test that all imports work correctly"""
@@ -29,15 +29,14 @@ def test_imports():
     try:
         # Core components
         from src.dynamics import TVCPlant, TVCParameters
-        from src.control import LQRController, CLFCBFQPFilter, LQRParameters, SafetyParameters
+        from src.control import MPCController, CLFCBFQPFilter, SafetyParameters
         from src.learning import (
-            EvolutionaryTrainer, ResidualPPOTrainer, 
+            EvolutionaryTrainer, ResidualPPOTrainer,
             SimpleControlNetwork, ResidualPolicyNetwork,
             EvolutionParameters, PPOParameters
         )
-        from src.simulation import TVCMuJoCoEnv, MuJoCoSimParams
         from src.utils import (
-            ExperimentConfig, create_default_config, 
+            ExperimentConfig, create_default_config,
             MetricsCollector, TVCVisualizer
         )
         from src.evaluation import ControllerEvaluator
@@ -55,8 +54,8 @@ def test_dynamics():
     print("Testing dynamics...")
     
     try:
-        from src.dynamics import test_tvc_plant
-        test_tvc_plant()
+        from src.dynamics.plant import test_plant
+        test_plant()
         print("  ✓ Dynamics test passed")
         return True
         
@@ -70,11 +69,10 @@ def test_control():
     print("Testing control...")
     
     try:
-        from src.control.lqr import test_lqr_controller
-        from src.control.safety import test_clf_cbf_qp_filter
-        
-        test_lqr_controller()
-        test_clf_cbf_qp_filter()
+        # Use safety filter test (MPC is exercised within it)
+        from src.control.safety import test_cbf_qp_filter
+
+        test_cbf_qp_filter()
         print("  ✓ Control test passed")
         return True
         
@@ -89,10 +87,10 @@ def test_learning():
     
     try:
         from src.learning.networks import test_networks
-        from src.learning.evolution import test_evolutionary_trainer
+        from src.learning.evolution import test_evolutionary_training
         
         test_networks()
-        test_evolutionary_trainer()
+        test_evolutionary_training()
         print("  ✓ Learning test passed")
         return True
         
@@ -106,8 +104,8 @@ def test_simulation():
     print("Testing simulation...")
     
     try:
-        from src.simulation import test_mujoco_env
-        test_mujoco_env()
+        from src.simulation.mujoco_env import test_realistic_env
+        test_realistic_env()
         print("  ✓ Simulation test passed")
         return True
         
@@ -158,25 +156,25 @@ def test_integration():
     try:
         from src.utils import create_default_config
         from src.dynamics import TVCPlant
-        from src.control import LQRController, CLFCBFQPFilter
+        from src.control import MPCController, CLFCBFQPFilter
         import numpy as np
         
         # Create minimal system
         config = create_default_config()
         plant = TVCPlant(config.plant)
-        lqr = LQRController(plant, config.lqr)
-        safety = CLFCBFQPFilter(plant, lqr, config.safety)
+        mpc = MPCController(plant, config.mpc)
+        safety = CLFCBFQPFilter(plant, mpc, config.safety)
         
         # Test basic operation
         x = np.array([0.1, 0.2])  # Small angle and rate
         reference = np.array([0.0, 0.0])
         
-        u_lqr = lqr.control(x, reference)
-        u_safe = safety.filter_control(x, u_lqr)
+        u_mpc = mpc.control(x, reference)
+        result = safety.filter_control(u_mpc, x)
         
         # Check that control outputs are reasonable
-        assert abs(u_lqr[0]) < 1.0, "LQR control too large"
-        assert abs(u_safe[0]) < 1.0, "Safe control too large"
+        assert abs(u_mpc) < 1.0, "MPC control too large"
+        assert abs(result['control']) < 1.0, "Safe control too large"
         
         print("  ✓ Integration test passed")
         return True
