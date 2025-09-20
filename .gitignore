@@ -1,0 +1,152 @@
+# -----------------------------------------------------------------------------
+# Python
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+pip-wheel-metadata/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+pytestdebug.log
+.pytest_cache/
+.pyre/
+.mypy_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints/
+
+# Virtual environments
+.env
+.env.*
+.venv
+.venv*/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Logs and temp
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+
+# -----------------------------------------------------------------------------
+# Project-specific outputs
+# -----------------------------------------------------------------------------
+# Training/evaluation artifacts
+results/
+runs/
+outputs/
+checkpoints/
+models/
+saved_models/
+artifacts/
+wandb/
+lightning_logs/
+tb_logs/
+events.out.tfevents*
+
+# Generated plots
+figures/
+plots/
+
+# Data caches (keep raw data if committed elsewhere)
+data/
+datasets/
+.cache/
+
+# Model weights (global patterns)
+*.pt
+*.pth
+*.onnx
+*.ckpt
+
+# -----------------------------------------------------------------------------
+# MuJoCo / Simulation
+# -----------------------------------------------------------------------------
+mjkey.txt
+.mujoco/
+.mjcache/
+*.mjb
+*.xml.tmp
+
+# -----------------------------------------------------------------------------
+# IDE / Editor
+# -----------------------------------------------------------------------------
+.vscode/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/launch.json
+
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# VS Code local history
+.history/
+
+# -----------------------------------------------------------------------------
+# OS-specific
+# -----------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# -----------------------------------------------------------------------------
+# Misc
+# -----------------------------------------------------------------------------
+# Node (if any tooling uses it)
+node_modules/
+
+# Mac/Linux swap files
+*~
+.*.swp
+.*.swo
