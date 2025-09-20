@@ -2,11 +2,11 @@
 Control module for TVC system
 """
 
-from .lqr import LQRController, LQRParameters
+from .mpc import MPCController, MPCParameters
 from .safety import CLFCBFQPFilter, SafetyParameters, CBFBarrier, AngleCBF, RateCBF
 
 __all__ = [
-    'LQRController', 'LQRParameters',
+    'MPCController', 'MPCParameters',
     'CLFCBFQPFilter', 'SafetyParameters', 
     'CBFBarrier', 'AngleCBF', 'RateCBF'
 ]
