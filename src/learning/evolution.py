@@ -28,6 +28,7 @@ import time
 from .networks import SimpleControlNetwork, create_evolution_network
 from ..dynamics import TVCPlant, TVCParameters
 from ..control import CLFCBFQPFilter, MPCController
+from ..utils.training_scenarios import ScenarioGenerator, TrainingScenario
 
 
 @dataclass
@@ -50,7 +51,7 @@ class EvolutionParameters:
     
     # Simulation parameters
     sim_duration: float = 5.0     # Simulation time per evaluation (seconds)
-    sim_dt: float = 0.01          # Simulation timestep
+    sim_dt: float = 0.005          # Simulation timestep (200Hz)
     num_trials: int = 3           # Multiple trials per network
     
     # Fitness parameters
@@ -61,6 +62,10 @@ class EvolutionParameters:
     # Parallelization
     use_multiprocessing: bool = True
     num_workers: Optional[int] = None  # None = auto-detect
+    
+    # Scenario-based training
+    use_scenarios: bool = True
+    scenario_mix: Optional[Dict[str, float]] = None  # Scenario weights
 
 
 class Individual:
@@ -478,7 +483,3 @@ def test_evolutionary_training():
         
         if i % 2 == 0:
             print(f"Step {i}: θ={state[0]:.3f}, θ̇={state[1]:.3f}, u={control:.3f}")
-
-
-if __name__ == "__main__":
-    test_evolutionary_training()
