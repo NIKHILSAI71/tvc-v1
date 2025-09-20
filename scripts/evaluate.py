@@ -28,8 +28,9 @@ else:
     raise ImportError(f"Source directory not found at {src_path}")
 
 from src.evaluation import ControllerEvaluator, run_comparison_experiment, test_evaluation_framework
+from src.utils import create_config_object
 import yaml
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 # Simple config loading utility
 def load_yaml_config(config_path: str) -> Dict[str, Any]:
@@ -111,19 +112,6 @@ def get_default_config() -> Dict[str, Any]:
         }
     }
 
-class ConfigObject:
-    """Simple configuration object with dot notation access"""
-    def __init__(self, config_dict: Dict[str, Any]):
-        for key, value in config_dict.items():
-            if isinstance(value, dict):
-                setattr(self, key, ConfigObject(value))
-            else:
-                setattr(self, key, value)
-
-def create_config_object(config_dict: Dict[str, Any]) -> ConfigObject:
-    """Create a configuration object from dictionary"""
-    return ConfigObject(config_dict)
-
 # Available predefined experiments (matching our config files)
 def get_available_experiments() -> Dict[str, str]:
     """Get available predefined experiment configurations"""
@@ -145,7 +133,7 @@ def get_available_experiments() -> Dict[str, str]:
     }
 
 
-def run_evaluation(experiment_name: str = None, config_path: str = None):
+def run_evaluation(experiment_name: Optional[str] = None, config_path: Optional[str] = None):
     """Run evaluation experiment"""
     
     # Load configuration
@@ -153,7 +141,8 @@ def run_evaluation(experiment_name: str = None, config_path: str = None):
         try:
             config_dict = load_yaml_config(config_path)
             config = create_config_object(config_dict)
-            print(f"Using configuration: {config.experiment_name}")
+            experiment_name_attr = getattr(config, 'experiment_name', 'evaluation')
+            print(f"Using configuration: {experiment_name_attr}")
         except Exception as e:
             print(f"Error loading configuration: {e}")
             print("Falling back to default configuration...")
@@ -186,8 +175,10 @@ def run_evaluation(experiment_name: str = None, config_path: str = None):
         config = create_config_object(config_dict)
         print("Using default configuration")
     
-    # Run evaluation
-    evaluator = ControllerEvaluator(config)
+    # Run evaluation using create_default_config since ControllerEvaluator expects ExperimentConfig
+    from src.utils.config import create_default_config
+    default_config = create_default_config()
+    evaluator = ControllerEvaluator(default_config)
     results = evaluator.run_complete_evaluation()
     
     return results, evaluator
@@ -367,10 +358,13 @@ def main():
     
     # Standard evaluation
     if args.experiment or args.config:
-        results, evaluator = run_evaluation(args.experiment, args.config)
-        if results:
+        result = run_evaluation(args.experiment, args.config)
+        if result is not None:
+            results, evaluator = result
             print(f"\nEvaluation completed successfully!")
             print(f"Results saved to: {evaluator.config.output_dir}")
+        else:
+            print("Evaluation failed!")
     else:
         # Default: run comparison
         print("No specific evaluation specified, running comparison experiment...")
