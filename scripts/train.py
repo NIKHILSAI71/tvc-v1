@@ -30,7 +30,7 @@ else:
     raise ImportError(f"Source directory not found at {src_path}")
 
 from src.dynamics import TVCPlant, TVCParameters
-from src.control import LQRController, CLFCBFQPFilter, LQRParameters, SafetyParameters
+from src.control import MPCController, CLFCBFQPFilter, MPCParameters, SafetyParameters
 from src.learning import EvolutionaryTrainer, ResidualPPOTrainer, EvolutionParameters, PPOParameters
 import yaml
 from typing import Dict, Any, Optional
@@ -171,33 +171,25 @@ def config_to_evolution_params(config) -> EvolutionParameters:
     )
 
 
-def config_to_lqr_params(config) -> LQRParameters:
-    """Convert config to LQRParameters"""
-    import numpy as np
-    lqr_config = config.lqr
-    
-    # Handle different LQR config formats
-    if hasattr(lqr_config, 'Q') and lqr_config.Q is not None:
-        Q = np.array(lqr_config.Q)
-    else:
-        # Default Q matrix
-        Q = np.array([[100, 0, 0, 0], [0, 100, 0, 0], [0, 0, 10, 0], [0, 0, 0, 10]])
-    
-    if hasattr(lqr_config, 'R') and lqr_config.R is not None:
-        if isinstance(lqr_config.R, (list, np.ndarray)):
-            R_arr = np.array(lqr_config.R)
-            # Reduce to scalar weight (take first diagonal if matrix)
-            if R_arr.ndim == 2:
-                R = float(R_arr[0, 0])
-            else:
-                R = float(R_arr[0])
-        else:
-            R = float(lqr_config.R)
-    else:
-        # Default scalar R weight
-        R = 1.0
-    
-    return LQRParameters(Q=Q, R=R)
+def config_to_mpc_params(config) -> MPCParameters:
+    """Convert config to MPCParameters with legacy LQR support"""
+    mpc_config = getattr(config, 'mpc', None)
+    # Backward compat: map legacy 'lqr' to MPC fields
+    if mpc_config is None and hasattr(config, 'lqr'):
+        legacy = config.lqr
+        Q = np.array(getattr(legacy, 'Q', [[100.0, 0.0], [0.0, 10.0]]))
+        R = getattr(legacy, 'R', 1.0)
+        return MPCParameters(Q=Q, R=float(R))
+    if mpc_config is None:
+        return MPCParameters()
+    Q = np.array(getattr(mpc_config, 'Q', [[100.0, 0.0], [0.0, 10.0]]))
+    R = float(getattr(mpc_config, 'R', 1.0))
+    N = int(getattr(mpc_config, 'N', 20))
+    dt = float(getattr(mpc_config, 'dt', 0.01))
+    du_rate_limit = bool(getattr(mpc_config, 'du_rate_limit', True))
+    warm_start = bool(getattr(mpc_config, 'warm_start', True))
+    terminal_lqr = bool(getattr(mpc_config, 'terminal_lqr', True))
+    return MPCParameters(Q=Q, R=R, N=N, dt=dt, du_rate_limit=du_rate_limit, warm_start=warm_start, terminal_lqr=terminal_lqr)
 
 
 def config_to_safety_params(config) -> SafetyParameters:
@@ -224,14 +216,14 @@ def config_to_ppo_params(config) -> PPOParameters:
     """Convert config to PPOParameters"""
     ppo_config = config.ppo
     return PPOParameters(
-        total_frames=ppo_config.total_frames,
-        frames_per_batch=ppo_config.frames_per_batch,
-        lr_actor=ppo_config.lr_actor,
-        lr_critic=ppo_config.lr_critic,
-        gamma=ppo_config.gamma,
-        clip_epsilon=ppo_config.clip_epsilon,
-        value_loss_coeff=getattr(ppo_config, 'value_loss_coef', 0.5),
-        entropy_bonus=getattr(ppo_config, 'entropy_coef', 0.01),
+        total_frames=getattr(ppo_config, 'total_frames', 1_000_000),
+        frames_per_batch=getattr(ppo_config, 'frames_per_batch', 2048),
+        lr_actor=getattr(ppo_config, 'lr_actor', 3e-4),
+        lr_critic=getattr(ppo_config, 'lr_critic', 3e-4),
+        gamma=getattr(ppo_config, 'gamma', 0.99),
+        clip_epsilon=getattr(ppo_config, 'clip_epsilon', 0.2),
+        value_loss_coeff=getattr(ppo_config, 'value_loss_coeff', getattr(ppo_config, 'value_loss_coef', 0.5)),
+        entropy_bonus=getattr(ppo_config, 'entropy_bonus', getattr(ppo_config, 'entropy_coef', 0.01)),
         mini_batch_size=getattr(ppo_config, 'mini_batch_size', 64),
         epochs_per_batch=getattr(ppo_config, 'epochs_per_batch', 10),
         max_grad_norm=getattr(ppo_config, 'max_grad_norm', 0.5),
