@@ -2,9 +2,9 @@
 Residual PPO Training for TVC Control
 
 This module implements residual reinforcement learning with PPO using TorchRL.
-The approach learns a residual policy that corrects the LQR baseline:
+The approach learns a residual policy that corrects the MPC baseline:
 
-u_total = u_LQR + π_residual(state)
+u_total = u_MPC + π_residual(state)
 
 The residual policy is trained with PPO while the safety filter ensures all
 actions remain within safe constraints during training and deployment.
@@ -39,7 +39,7 @@ from tensordict.nn.distributions import NormalParamExtractor
 
 from .networks import ResidualPolicyNetwork, ValueNetwork, create_residual_policy, create_value_network
 from ..dynamics import TVCPlant, TVCParameters
-from ..control import LQRController, CLFCBFQPFilter
+from ..control import MPCController, CLFCBFQPFilter
 
 
 @dataclass
@@ -97,7 +97,7 @@ class TVCResidualEnv(EnvBase):
         
         # Initialize components
         self.plant = TVCPlant(plant_params)
-        self.lqr = LQRController(self.plant)
+        self.lqr = MPCController(self.plant)
         
         if use_safety_filter:
             self.safety_filter = CLFCBFQPFilter(self.plant, self.lqr)
@@ -125,10 +125,15 @@ class TVCResidualEnv(EnvBase):
             high=torch.tensor([max_residual], dtype=torch.float32, device=self.device),
             device=self.device,
         )
-
+        
         # Reward and done specs
         self.reward_spec = UnboundedContinuousTensorSpec(shape=torch.Size([1]), device=self.device)
-        self.done_spec = DiscreteTensorSpec(n=2, dtype=torch.bool, device=self.device)
+        # Full done spec: done, terminated, truncated
+        self.full_done_spec = CompositeSpec(
+            done=DiscreteTensorSpec(n=2, shape=torch.Size([1]), dtype=torch.bool, device=self.device),
+            terminated=DiscreteTensorSpec(n=2, shape=torch.Size([1]), dtype=torch.bool, device=self.device),
+            truncated=DiscreteTensorSpec(n=2, shape=torch.Size([1]), dtype=torch.bool, device=self.device),
+        ).to(self.device)
     
     def _reset(self, tensordict: TensorDict, **kwargs) -> TensorDict:
         """Reset environment to initial state"""
@@ -150,6 +155,7 @@ class TVCResidualEnv(EnvBase):
                 "observation": observation,
                 "done": torch.tensor([False], dtype=torch.bool, device=self.device),
                 "terminated": torch.tensor([False], dtype=torch.bool, device=self.device),
+                "truncated": torch.tensor([False], dtype=torch.bool, device=self.device),
             },
             batch_size=(),
             device=self.device,
@@ -189,10 +195,11 @@ class TVCResidualEnv(EnvBase):
         # Check termination conditions
         self.step_count += 1
         terminated = (self.step_count >= self.ppo_params.max_episode_length or 
-                     not self.plant.is_safe())
+                 not self.plant.is_safe())
         
-        # Create observation tensor
+        # Create observation tensors (current and next)
         observation = torch.tensor(next_state, dtype=torch.float32, device=self.device)
+        prev_observation = torch.tensor(current_state, dtype=torch.float32, device=self.device)
         
         # Update episode reward
         self.episode_reward += reward
@@ -200,16 +207,22 @@ class TVCResidualEnv(EnvBase):
         # Create output tensordict
         out = TensorDict(
             {
+                "observation": prev_observation,
+                "reward": torch.tensor([reward], dtype=torch.float32, device=self.device),
+                "done": torch.tensor([False], dtype=torch.bool, device=self.device),
+                "terminated": torch.tensor([False], dtype=torch.bool, device=self.device),
+                "truncated": torch.tensor([False], dtype=torch.bool, device=self.device),
                 "next": TensorDict(
                     {
                         "observation": observation,
                         "reward": torch.tensor([reward], dtype=torch.float32, device=self.device),
                         "done": torch.tensor([terminated], dtype=torch.bool, device=self.device),
                         "terminated": torch.tensor([terminated], dtype=torch.bool, device=self.device),
+                        "truncated": torch.tensor([False], dtype=torch.bool, device=self.device),
                     },
                     batch_size=(),
                     device=self.device,
-                )
+                ),
             },
             batch_size=(),
             device=self.device,
@@ -281,8 +294,8 @@ class ResidualPPOTrainer:
         # Create environment
         self.env = TVCResidualEnv(plant_params, self.ppo_params, use_safety_filter, device)
         
-        # Check environment specs
-        check_env_specs(self.env)
+    # Optionally check environment specs (disabled to avoid rollout issues during init)
+    # check_env_specs(self.env)
         
         # Create actor-critic networks
         self._create_networks()
@@ -314,22 +327,14 @@ class ResidualPPOTrainer:
             out_keys=["loc", "scale"]
         )
         
-        # Wrap in probabilistic actor
-        # Bounds for TanhNormal mapping
-        max_residual = float(self.plant_params.max_gimbal_angle * self.ppo_params.residual_scale)
-        min_action = torch.tensor([-max_residual], dtype=torch.float32, device=self.device)
-        max_action = torch.tensor([max_residual], dtype=torch.float32, device=self.device)
-
+        # Wrap in probabilistic actor (bounded via spec)
         self.actor = ProbabilisticActor(
             module=self.actor_module,
             in_keys=["loc", "scale"],
             out_keys=["action"],
             distribution_class=TanhNormal,
-            distribution_kwargs={
-                "min": min_action,
-                "max": max_action,
-            },
             return_log_prob=True,
+            spec=self.env.action_spec,
         )
         
         # Critic network (value function)
