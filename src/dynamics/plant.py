@@ -266,7 +266,3 @@ def test_plant():
     
     print(f"\nSafety status: {plant.is_safe()}")
     print(f"Safety margins: {plant.get_safety_margins()}")
-
-
-if __name__ == "__main__":
-    test_plant()
