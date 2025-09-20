@@ -21,6 +21,21 @@ from src.learning.evolution import EvolutionParameters
 from src.learning.ppo import PPOParameters
 
 
+class ConfigObject:
+    """Simple configuration object with dot notation access"""
+    def __init__(self, config_dict: Dict[str, Any]):
+        for key, value in config_dict.items():
+            if isinstance(value, dict):
+                setattr(self, key, ConfigObject(value))
+            else:
+                setattr(self, key, value)
+
+
+def create_config_object(config_dict: Dict[str, Any]) -> ConfigObject:
+    """Create a configuration object from dictionary"""
+    return ConfigObject(config_dict)
+
+
 @dataclass
 class ExperimentConfig:
     """Complete configuration for TVC experiments"""
@@ -265,7 +280,3 @@ def test_config_system():
     print(f"Predefined configs: {list(configs.keys())}")
     
     print("Configuration system test completed!")
-
-
-if __name__ == "__main__":
-    test_config_system()
