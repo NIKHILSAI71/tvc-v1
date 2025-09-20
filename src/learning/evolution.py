@@ -29,6 +29,7 @@ from .networks import SimpleControlNetwork, create_evolution_network
 from ..dynamics import TVCPlant, TVCParameters
 from ..control import CLFCBFQPFilter, MPCController
 from ..utils.training_scenarios import ScenarioGenerator, TrainingScenario
+from ..utils.curriculum_learning import CurriculumManager, create_adaptive_curriculum
 
 
 @dataclass
@@ -66,6 +67,7 @@ class EvolutionParameters:
     # Scenario-based training
     use_scenarios: bool = True
     scenario_mix: Optional[Dict[str, float]] = None  # Scenario weights
+    use_curriculum: bool = True
 
 
 class Individual:
@@ -81,9 +83,10 @@ class Individual:
                         eval_func: Callable,
                         plant_params: TVCParameters,
                         evo_params: EvolutionParameters,
-                        safety_filter: Optional[CLFCBFQPFilter] = None) -> float:
+                        safety_filter: Optional[CLFCBFQPFilter] = None,
+                        trial_scenarios: Optional[List[Optional[TrainingScenario]]] = None) -> float:
         """Evaluate fitness of this individual"""
-        self.fitness = eval_func(self.network, plant_params, evo_params, safety_filter)
+        self.fitness = eval_func(self.network, plant_params, evo_params, safety_filter, trial_scenarios)
         return self.fitness
     
     def mutate(self, strength: float):
@@ -106,7 +109,8 @@ class Individual:
 def evaluate_network_fitness(network: SimpleControlNetwork,
                             plant_params: TVCParameters,
                             evo_params: EvolutionParameters,
-                            safety_filter: Optional[CLFCBFQPFilter] = None) -> float:
+                            safety_filter: Optional[CLFCBFQPFilter] = None,
+                            trial_scenarios: Optional[List[Optional[TrainingScenario]]] = None) -> float:
     """
     Evaluate fitness of a neural network controller
     
@@ -128,14 +132,23 @@ def evaluate_network_fitness(network: SimpleControlNetwork,
     
     # Run multiple trials with different initial conditions
     for trial in range(evo_params.num_trials):
+        scenario = None
+        if trial_scenarios is not None and trial < len(trial_scenarios):
+            scenario = trial_scenarios[trial]
         # Random initial conditions
-        initial_angle = np.random.uniform(-0.3, 0.3)  # ±17 degrees
-        initial_rate = np.random.uniform(-0.5, 0.5)   # ±0.5 rad/s
+        if scenario is not None:
+            initial_angle = np.random.uniform(*scenario.initial_angle_range)
+            initial_rate = np.random.uniform(*scenario.initial_rate_range)
+            sim_duration = float(getattr(scenario, 'episode_duration', evo_params.sim_duration))
+        else:
+            initial_angle = np.random.uniform(-0.3, 0.3)  # ±17 degrees
+            initial_rate = np.random.uniform(-0.5, 0.5)   # ±0.5 rad/s
+            sim_duration = evo_params.sim_duration
         initial_state = np.array([initial_angle, initial_rate])
         
         # Simulate single trial
         trial_fitness = _simulate_trial(
-            network, initial_state, plant_params, evo_params, safety_filter
+            network, initial_state, plant_params, evo_params, safety_filter, sim_duration
         )
         total_fitness += trial_fitness
     
@@ -146,7 +159,8 @@ def _simulate_trial(network: SimpleControlNetwork,
                    initial_state: np.ndarray,
                    plant_params: TVCParameters,
                    evo_params: EvolutionParameters,
-                   safety_filter: Optional[CLFCBFQPFilter] = None) -> float:
+                   safety_filter: Optional[CLFCBFQPFilter] = None,
+                   sim_duration: Optional[float] = None) -> float:
     """Simulate a single trial and compute fitness"""
     
     # Initialize plant
@@ -154,7 +168,8 @@ def _simulate_trial(network: SimpleControlNetwork,
     plant.reset(initial_state)
     
     # Simulation variables
-    num_steps = int(evo_params.sim_duration / evo_params.sim_dt)
+    sim_T = float(sim_duration if sim_duration is not None else evo_params.sim_duration)
+    num_steps = int(sim_T / evo_params.sim_dt)
     thrust = plant_params.nominal_thrust
     
     # Tracking variables
@@ -247,6 +262,14 @@ class EvolutionaryTrainer:
             baseline = MPCController(plant)
             self.safety_filter = CLFCBFQPFilter(plant, baseline)
         
+        # Scenario + curriculum (optional)
+        self.scenario_gen: Optional[ScenarioGenerator] = None
+        self.curriculum: Optional[CurriculumManager] = None
+        if self.evo_params.use_scenarios:
+            self.scenario_gen = ScenarioGenerator()
+            if self.evo_params.use_curriculum:
+                self.curriculum = create_adaptive_curriculum(self.scenario_gen)
+
         # Initialize population
         self.population: List[Individual] = []
         self.generation = 0
@@ -277,17 +300,35 @@ class EvolutionaryTrainer:
         print(f"Evaluating generation {self.generation}...")
         start_time = time.time()
         
+        # Prepare scenarios per individual/trial if enabled
+        scenarios_per_individual: Optional[List[List[Optional[TrainingScenario]]]] = None
+        if self.scenario_gen is not None:
+            scenarios_per_individual = []
+            for _ in range(len(self.population)):
+                trial_scenarios: List[Optional[TrainingScenario]] = []
+                for _t in range(self.evo_params.num_trials):
+                    if self.curriculum is not None:
+                        trial_scenarios.append(self.curriculum.get_next_scenario())
+                    else:
+                        # Sample by difficulty with slight bias towards mid-range
+                        all_scen = self.scenario_gen.scenarios
+                        idx = np.random.choice(len(all_scen))
+                        trial_scenarios.append(all_scen[idx])
+                scenarios_per_individual.append(trial_scenarios)
+        
         if self.evo_params.use_multiprocessing and (self.evo_params.num_workers or 0) > 1:
             # Parallel evaluation
             with ProcessPoolExecutor(max_workers=self.evo_params.num_workers) as executor:
                 futures = []
-                for individual in self.population:
+                for i, individual in enumerate(self.population):
+                    trial_scenarios = scenarios_per_individual[i] if scenarios_per_individual is not None else []
                     future = executor.submit(
                         evaluate_network_fitness,
                         individual.network,
                         self.plant_params,
                         self.evo_params,
-                        self.safety_filter
+                        self.safety_filter,
+                        trial_scenarios
                     )
                     futures.append(future)
                 
@@ -296,16 +337,25 @@ class EvolutionaryTrainer:
                     self.population[i].fitness = future.result()
         else:
             # Sequential evaluation
-            for individual in self.population:
+            for i, individual in enumerate(self.population):
+                trial_scenarios = scenarios_per_individual[i] if scenarios_per_individual is not None else []
                 individual.evaluate_fitness(
                     evaluate_network_fitness,
                     self.plant_params,
                     self.evo_params,
-                    self.safety_filter
+                    self.safety_filter,
+                    trial_scenarios
                 )
         
         eval_time = time.time() - start_time
         print(f"Evaluation completed in {eval_time:.2f}s")
+
+        # Update curriculum based on best individual's performance
+        if self.curriculum is not None:
+            try:
+                self._update_curriculum()
+            except Exception:
+                pass
         
     def _select_and_reproduce(self):
         """Select elite and create next generation"""
@@ -349,6 +399,46 @@ class EvolutionaryTrainer:
             new_population.append(individual)
         
         self.population = new_population
+
+    def _update_curriculum(self):
+        """Evaluate best individual on current curriculum scenario and record result"""
+        # Ensure population has been evaluated and sorted
+        self.population.sort(key=lambda x: x.fitness, reverse=True)
+        best = self.population[0]
+        # Evaluate a few episodes to stabilize success metric
+        episodes = 3
+        for _ in range(episodes):
+            scenario = self.curriculum.get_next_scenario() if self.curriculum is not None else None
+            if scenario is None:
+                continue
+            # Sample initial state per scenario
+            initial_angle = np.random.uniform(*scenario.initial_angle_range)
+            initial_rate = np.random.uniform(*scenario.initial_rate_range)
+            initial_state = np.array([initial_angle, initial_rate])
+            # Run one episode
+            _ = _simulate_trial(best.network, initial_state, self.plant_params, self.evo_params, self.safety_filter, scenario.episode_duration)
+            # Use last state metrics by re-simulating a single step to get observation
+            # Simpler heuristic: success if abs(initial_angle) reduced significantly
+            # For a more accurate check, run a fresh short simulation and check final state
+            plant = TVCPlant(self.plant_params)
+            plant.reset(initial_state)
+            dt = self.evo_params.sim_dt
+            total_T = min(scenario.episode_duration, 3.0)
+            steps = int(total_T / dt)
+            for _s in range(steps):
+                state = plant.get_observation(add_noise=False)
+                thrust = self.plant_params.nominal_thrust
+                inp = torch.tensor([thrust, state[0], state[1]], dtype=torch.float32).unsqueeze(0)
+                with torch.no_grad():
+                    u = best.network(inp).item()
+                plant.step(u, dt, add_disturbance=True)
+            final_state = plant.get_observation(add_noise=False)
+            success = (abs(final_state[0]) <= scenario.max_stable_angle and abs(final_state[1]) <= scenario.max_stable_rate)
+            if self.curriculum is not None:
+                self.curriculum.record_episode_result(scenario.name, success, {
+                'final_angle': float(final_state[0]),
+                'final_rate': float(final_state[1])
+                })
         
     def train(self) -> Dict:
         """
