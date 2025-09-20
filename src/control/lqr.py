@@ -21,7 +21,7 @@ from ..dynamics import TVCPlant, TVCParameters
 class LQRParameters:
     """LQR controller tuning parameters"""
     # State weights [θ, θ̇]
-    Q: np.ndarray = None
+    Q: Optional[np.ndarray] = None
     
     # Control weight
     R: float = 1.0
@@ -75,7 +75,7 @@ class LQRController:
         print(f"K = {self.K}")
         print(f"P = \n{self.P}")
         
-    def control(self, state: np.ndarray, reference: np.ndarray = None) -> float:
+    def control(self, state: np.ndarray, reference: Optional[np.ndarray] = None) -> float:
         """
         Compute LQR control action
         
@@ -92,7 +92,7 @@ class LQRController:
         error = state - reference
         return -np.dot(self.K, error)
     
-    def lyapunov_function(self, state: np.ndarray, reference: np.ndarray = None) -> float:
+    def lyapunov_function(self, state: np.ndarray, reference: Optional[np.ndarray] = None) -> float:
         """
         Compute Lyapunov function value V(x) = x^T P x
         
@@ -109,7 +109,7 @@ class LQRController:
         error = state - reference
         return error.T @ self.P @ error
     
-    def lyapunov_derivative(self, state: np.ndarray, control: float, reference: np.ndarray = None) -> float:
+    def lyapunov_derivative(self, state: np.ndarray, control: float, reference: Optional[np.ndarray] = None) -> float:
         """
         Compute Lyapunov function derivative: dV/dt = ∇V^T (f + gu)
         
@@ -136,7 +136,7 @@ class LQRController:
         # dV/dt = ∇V^T (f + gu)
         return grad_V.T @ (f_x + g_x * control)
     
-    def clf_constraint_coefficients(self, state: np.ndarray, reference: np.ndarray = None) -> Tuple[float, float, float]:
+    def clf_constraint_coefficients(self, state: np.ndarray, reference: Optional[np.ndarray] = None) -> Tuple[float, float, float]:
         """
         Compute CLF constraint coefficients for QP: L_f V + L_g V * u + γV ≤ δ
         
@@ -168,7 +168,7 @@ class LQRController:
         
         return L_f_V, L_g_V, self.params.clg_gamma * V_x
     
-    def is_stable_with_lqr(self, state: np.ndarray, reference: np.ndarray = None) -> bool:
+    def is_stable_with_lqr(self, state: np.ndarray, reference: Optional[np.ndarray] = None) -> bool:
         """
         Check if LQR control would be stabilizing (V̇ < 0)
         
@@ -264,7 +264,3 @@ def test_lqr_controller():
         if i % 10 == 0:
             V = controller.lyapunov_function(state)
             print(f"t={i*0.01:.2f}s: θ={state[0]:.3f}, θ̇={state[1]:.3f}, u={u:.3f}, V={V:.3f}")
-
-
-if __name__ == "__main__":
-    test_lqr_controller()
