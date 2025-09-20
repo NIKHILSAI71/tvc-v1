@@ -1,42 +1,48 @@
 # TVC Controller Requirements
 # Core dependencies for TVC thrust vector control system
+# Updated with latest stable versions (September 2025)
 
 # Deep Learning & RL
-# Use latest stable tested versions (2025)
-torch>=2.3.0
-torchrl>=0.4.0
-tensordict>=0.4.0
+torch>=2.4.0
+torchrl>=0.5.0
+tensordict>=0.5.0
 
-# Scientific Computing
-numpy>=1.24.0
-scipy>=1.10.0
+# Scientific Computing & Optimization
+numpy>=2.1.0
+scipy>=1.14.0
+numba>=0.62.0
 
 # Control Theory
-cvxpy>=1.4.0
+cvxpy>=1.5.0
 osqp>=1.0.4
 qpsolvers>=4.8.1
 
 # Physics Simulation
-mujoco>=3.1.5
+mujoco>=3.2.0
 gymnasium>=0.29.1
 
 # Data & Visualization  
-matplotlib>=3.7.0
-seaborn>=0.12.0
-pandas>=2.0.0
+matplotlib>=3.10.6
+seaborn>=0.13.0
+pandas>=2.2.0
+
+# Machine Learning & Hyperparameter Optimization
+optuna>=4.5.0
 
 # Configuration & Utilities
-pyyaml>=6.0
-hydra-core>=1.3.0
-wandb>=0.16.0
+pyyaml>=6.0.2
+hydra-core>=1.3.2
+
+# Experiment Tracking
+wandb>=0.22.0
 
 # Development & Testing
-pytest>=7.4.0
-black>=23.0.0
-flake8>=6.0.0
+pytest>=8.3.0
+black>=24.8.0
+flake8>=7.1.0
 
 # Optional: Jupyter support
-ipykernel>=6.25.0
-jupyter>=1.0.0
-tqdm>=4.66.0
+ipykernel>=6.29.0
+jupyter>=1.1.0
+tqdm>=4.66.5
 
