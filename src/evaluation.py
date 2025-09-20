@@ -19,7 +19,7 @@ import matplotlib.pyplot as plt
 
 # Import all TVC components
 from src.dynamics.plant import TVCPlant
-from src.control.lqr import LQRController
+from src.control.mpc import MPCController
 from src.control.safety import CLFCBFQPFilter
 from src.learning.evolution import EvolutionaryTrainer
 from src.learning.ppo import ResidualPPOTrainer
@@ -37,10 +37,14 @@ class ControllerEvaluator:
     def __init__(self, config: ExperimentConfig):
         self.config = config
         self.plant = TVCPlant(config.plant)
-    self.visualizer = TVCVisualizer(save_dir=str(Path(config.output_dir) / "plots"))
+        self.visualizer = TVCVisualizer(save_dir=str(Path(config.output_dir) / "plots"))
         
         # Initialize controllers
-        self.lqr_controller = LQRController(self.plant, config.lqr)
+        # MPC baseline controller (drop-in for LQR); support both 'mpc' and legacy 'lqr' params
+        mpc_params = getattr(config, 'mpc', None)
+        if mpc_params is None:
+            mpc_params = getattr(config, 'lqr', None)
+        self.lqr_controller = MPCController(self.plant, mpc_params)
         self.safety_filter = CLFCBFQPFilter(self.plant, self.lqr_controller, config.safety)
         
         # Results storage
@@ -50,8 +54,8 @@ class ControllerEvaluator:
         print(f"Evaluator initialized for experiment: {config.experiment_name}")
     
     def evaluate_lqr_baseline(self) -> ExperimentMetrics:
-        """Evaluate pure LQR controller"""
-        print("Evaluating LQR baseline controller...")
+        """Evaluate pure MPC controller (formerly LQR baseline)"""
+        print("Evaluating MPC baseline controller...")
         
         episodes = []
         
@@ -72,10 +76,10 @@ class ControllerEvaluator:
         
         # Compute aggregate metrics
         exp_metrics = MetricsAnalyzer.compute_experiment_metrics(
-            episodes, controller_type="lqr_baseline"
+            episodes, controller_type="mpc_baseline"
         )
         
-        print(f"LQR Baseline Results:")
+        print(f"MPC Baseline Results:")
         print(f"  Mean RMS Error: {exp_metrics.mean_rms_error:.4f} ± {exp_metrics.std_rms_error:.4f}")
         print(f"  Success Rate: {exp_metrics.success_rate:.2%}")
         print(f"  Safety Violations: {exp_metrics.total_safety_violations}")
@@ -83,8 +87,8 @@ class ControllerEvaluator:
         return exp_metrics
     
     def evaluate_safe_lqr(self) -> ExperimentMetrics:
-        """Evaluate LQR with CBF safety filter"""
-        print("Evaluating LQR with CBF safety filter...")
+        """Evaluate MPC with CBF safety filter"""
+        print("Evaluating MPC with CBF safety filter...")
         
         episodes = []
         
@@ -105,10 +109,10 @@ class ControllerEvaluator:
         
         # Compute aggregate metrics
         exp_metrics = MetricsAnalyzer.compute_experiment_metrics(
-            episodes, controller_type="safe_lqr"
+            episodes, controller_type="safe_mpc"
         )
         
-        print(f"Safe LQR Results:")
+        print(f"Safe MPC Results:")
         print(f"  Mean RMS Error: {exp_metrics.mean_rms_error:.4f} ± {exp_metrics.std_rms_error:.4f}")
         print(f"  Success Rate: {exp_metrics.success_rate:.2%}")
         print(f"  Safety Violations: {exp_metrics.total_safety_violations}")
@@ -343,18 +347,18 @@ class ControllerEvaluator:
         all_results = {}
         all_training_curves = {}
         
-        # 1. LQR Baseline
+        # 1. MPC Baseline
         print("\n" + "="*40)
-        print("1. EVALUATING LQR BASELINE")
+        print("1. EVALUATING MPC BASELINE")
         print("="*40)
-        all_results['lqr_baseline'] = self.evaluate_lqr_baseline()
+        all_results['mpc_baseline'] = self.evaluate_lqr_baseline()
         
-        # 2. Safe LQR
+        # 2. Safe MPC
         if self.config.use_safety_filter:
             print("\n" + "="*40)
-            print("2. EVALUATING SAFE LQR")
+            print("2. EVALUATING SAFE MPC")
             print("="*40)
-            all_results['safe_lqr'] = self.evaluate_safe_lqr()
+            all_results['safe_mpc'] = self.evaluate_safe_lqr()
         
         # 3. Neuro-Evolution
         print("\n" + "="*40)
@@ -430,7 +434,7 @@ class ControllerEvaluator:
                 u = u_lqr
             
             # Record data
-            collector.step(t, x, np.array([u]), reference)
+            collector.step(float(t), x, np.array([u], dtype=float), reference)
             
             # Simulate plant dynamics
             x = self.plant.step(u, dt=dt, add_disturbance=False)
@@ -477,7 +481,7 @@ class ControllerEvaluator:
                 u = float(u_neural[0])
             
             # Record data
-            collector.step(t, x, np.array([u]), reference)
+            collector.step(float(t), x, np.array([u], dtype=float), reference)
             
             # Simulate plant dynamics
             x = self.plant.step(u, dt=dt, add_disturbance=False)
@@ -531,7 +535,7 @@ class ControllerEvaluator:
                 u = u_total
             
             # Record data
-            collector.step(t, x, np.array([u]), reference)
+            collector.step(float(t), x, np.array([u], dtype=float), reference)
             
             # Simulate plant dynamics
             x = self.plant.step(u, dt=dt, add_disturbance=False)
@@ -622,8 +626,10 @@ class ControllerEvaluator:
         # Convert to serializable format
         serializable_results = {}
         for name, exp_metrics in self.results.items():
-            MetricsAnalyzer.save_metrics(exp_metrics, 
-                                       Path(self.config.output_dir) / f"{name}_metrics.json")
+            MetricsAnalyzer.save_metrics(
+                exp_metrics,
+                str(Path(self.config.output_dir) / f"{name}_metrics.json")
+            )
         
         # Save comparison results
         with open(results_path, 'w') as f:
@@ -645,9 +651,12 @@ def run_comparison_experiment():
     config.experiment_name = "tvc_controller_comparison"
     config.output_dir = "./results/comparison"
     config.eval_episodes = 50  # Reduced for faster testing
-    config.evolution.population_size = 200  # Reduced for faster testing
-    config.evolution.max_generations = 100
-    config.ppo.total_frames = 500_000  # Reduced for faster testing
+    # Guard optional configs
+    if config.evolution is not None:
+        config.evolution.population_size = 200  # Reduced for faster testing
+        config.evolution.max_generations = 100
+    if config.ppo is not None:
+        config.ppo.total_frames = 500_000  # Reduced for faster testing
     
     # Initialize evaluator
     evaluator = ControllerEvaluator(config)
@@ -668,22 +677,24 @@ def test_evaluation_framework():
     config.experiment_name = "test_evaluation"
     config.output_dir = "./test_results"
     config.eval_episodes = 5  # Very small for testing
-    config.evolution.population_size = 20
-    config.evolution.max_generations = 5
-    config.ppo.total_frames = 10_000
+    if config.evolution is not None:
+        config.evolution.population_size = 20
+        config.evolution.max_generations = 5
+    if config.ppo is not None:
+        config.ppo.total_frames = 10_000
     config.use_safety_filter = True
     
     # Initialize evaluator
     evaluator = ControllerEvaluator(config)
     
     # Test individual evaluations
-    print("Testing LQR baseline...")
+    print("Testing MPC baseline...")
     lqr_results = evaluator.evaluate_lqr_baseline()
-    print(f"  ✓ LQR test completed, RMS error: {lqr_results.mean_rms_error:.4f}")
+    print(f"  ✓ MPC test completed, RMS error: {lqr_results.mean_rms_error:.4f}")
     
-    print("Testing safe LQR...")
+    print("Testing safe MPC...")
     safe_lqr_results = evaluator.evaluate_safe_lqr()
-    print(f"  ✓ Safe LQR test completed, RMS error: {safe_lqr_results.mean_rms_error:.4f}")
+    print(f"  ✓ Safe MPC test completed, RMS error: {safe_lqr_results.mean_rms_error:.4f}")
     
     print("Testing evolution...")
     evolution_results, _ = evaluator.train_and_evaluate_evolution()
