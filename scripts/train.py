@@ -32,6 +32,7 @@ else:
 from src.dynamics import TVCPlant, TVCParameters
 from src.control import MPCController, CLFCBFQPFilter, MPCParameters, SafetyParameters
 from src.learning import EvolutionaryTrainer, ResidualPPOTrainer, EvolutionParameters, PPOParameters
+from src.utils import create_config_object
 import yaml
 from typing import Dict, Any, Optional
 
@@ -113,19 +114,6 @@ def get_default_config() -> Dict[str, Any]:
             'lyapunov_eps': 0.1
         }
     }
-
-class ConfigObject:
-    """Simple configuration object with dot notation access"""
-    def __init__(self, config_dict: Dict[str, Any]):
-        for key, value in config_dict.items():
-            if isinstance(value, dict):
-                setattr(self, key, ConfigObject(value))
-            else:
-                setattr(self, key, value)
-
-def create_config_object(config_dict: Dict[str, Any]) -> ConfigObject:
-    """Create a configuration object from dictionary"""
-    return ConfigObject(config_dict)
 
 
 def config_to_plant_params(config) -> TVCParameters:
