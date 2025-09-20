@@ -33,7 +33,7 @@ project_root = script_dir.parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.dynamics import TVCParameters
-from src.control import LQRController, CLFCBFQPFilter
+from src.control import MPCController, CLFCBFQPFilter
 from src.utils.config import ExperimentConfig
 
 
@@ -385,8 +385,8 @@ class RealisticTVCMuJoCoEnv(gym.Env):
         if use_safety_filter:
             from src.dynamics import TVCPlant
             plant = TVCPlant(self.config.plant)
-            lqr = LQRController(plant)
-            self.safety_filter = CLFCBFQPFilter(plant, lqr)
+            baseline = MPCController(plant)
+            self.safety_filter = CLFCBFQPFilter(plant, baseline)
         else:
             self.safety_filter = None
         
@@ -459,7 +459,7 @@ class RealisticTVCMuJoCoEnv(gym.Env):
             # Create simplified config (we mainly need plant parameters)
             config = ExperimentConfig(
                 plant=plant,
-                lqr=None,  # Will be set by safety filter if needed
+                mpc=None,  # Will be set/used by safety filter if needed
                 safety=None,
                 evolution=None,
                 ppo=None,
@@ -475,7 +475,7 @@ class RealisticTVCMuJoCoEnv(gym.Env):
             print("Using default parameters...")
             return ExperimentConfig(
                 plant=TVCParameters(),
-                lqr=None, safety=None, evolution=None, ppo=None, simulation=None
+                mpc=None, safety=None, evolution=None, ppo=None, simulation=None
             )
     
     def _create_mujoco_model(self):
