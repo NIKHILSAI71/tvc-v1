@@ -1,0 +1,60 @@
+# Precision Landing Configuration
+# For high-precision landing applications
+
+experiment_name: "precision_landing"
+output_dir: "./results/precision_landing"
+use_safety_filter: true
+save_models: true
+save_plots: true
+eval_episodes: 200
+eval_seed: 42
+
+# Plant Parameters - Optimized for precision
+plant:
+  mass: 1.2                    # Moderate mass for control authority
+  moment_of_inertia: 0.12      # Balanced inertia
+  length: 1.1                  # Standard length
+  nominal_thrust: 18.0         # Higher thrust for precision control
+  max_gimbal_angle: 0.436      # Moderate gimbal range (25 degrees)
+  max_angle: 0.524             # Conservative angle limits (30 degrees)
+  max_angular_rate: 4.19       # Moderate rates for precision
+
+# LQR Controller Parameters - Precision-tuned
+lqr:
+  Q: null
+  R: 1.5                       # Higher control penalty for smoothness
+  clg_gamma: 4.0               # Fast CLF for tight control
+
+# Safety Filter Parameters - Precision safety
+safety:
+  angle_cbf_alpha: 5.0         # Tight angle control
+  rate_cbf_alpha: 4.0          # Tight rate control
+  clf_penalty: 2500.0          # High penalty for precision
+
+# Evolution Parameters - Fine-tuned evolution
+evolution:
+  population_size: 800         # Moderate population for precision
+  max_generations: 600         # Extended evolution for precision
+  sim_duration: 10.0           # Long simulation for precision tasks
+  mutation_strength: 0.03      # Small mutations for fine-tuning
+
+# PPO Parameters - Precision learning
+ppo:
+  total_frames: 3000000        # Extended training for precision
+  frames_per_batch: 2048       # Standard batches
+  clip_epsilon: 0.15           # Conservative clipping for precision
+  lr_actor: 0.00005            # Very low LR for fine control
+  lr_critic: 0.0002
+
+# Simulation Parameters - High fidelity for precision
+simulation:
+  timestep: 0.0002             # Very fine timestep
+  control_timestep: 0.002      # High-frequency control
+  max_episode_steps: 5000      # Very long episodes for precision tasks
+
+# Precision-specific parameters
+precision_parameters:
+  landing_accuracy_target: 0.1 # Target landing accuracy (m)
+  velocity_tolerance: 0.05     # Landing velocity tolerance (m/s)
+  angle_tolerance: 0.017       # Final angle tolerance (1 degree)
+  success_reward_multiplier: 10.0  # Bonus for precision landing

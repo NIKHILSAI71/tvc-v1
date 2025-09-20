@@ -1,0 +1,53 @@
+# PPO-Only Configuration
+# Focus on residual PPO training
+
+experiment_name: "ppo_only"
+output_dir: "./results/ppo_only"
+use_safety_filter: false     # No safety filter for pure PPO
+save_models: true
+save_plots: true
+eval_episodes: 100
+eval_seed: 42
+
+# Plant Parameters - Standard for PPO
+plant:
+  mass: 1.0
+  moment_of_inertia: 0.1
+  length: 1.0
+  nominal_thrust: 15.0
+  max_gimbal_angle: 0.524
+  max_angle: 0.785
+  max_angular_rate: 6.28
+
+# LQR Controller Parameters - Baseline for residual learning
+lqr:
+  Q: null
+  R: 1.0
+  clg_gamma: 2.0
+
+# Safety Filter Parameters - Not used but required
+safety:
+  angle_cbf_alpha: 3.0
+  rate_cbf_alpha: 2.0
+  clf_penalty: 1000.0
+
+# Evolution Parameters - Not used but required
+evolution:
+  population_size: 100         # Minimal
+  max_generations: 10
+  sim_duration: 1.0
+  mutation_strength: 0.1
+
+# PPO Parameters - Optimized for residual learning
+ppo:
+  total_frames: 3000000        # Extended PPO training
+  frames_per_batch: 4096       # Large batches for stable gradients
+  clip_epsilon: 0.2            # Standard clipping
+  lr_actor: 0.0002             # Optimized learning rates
+  lr_critic: 0.0005            # Higher critic LR
+
+# Simulation Parameters - Optimized for PPO
+simulation:
+  timestep: 0.001
+  control_timestep: 0.01
+  max_episode_steps: 1500      # Longer episodes for PPO learning

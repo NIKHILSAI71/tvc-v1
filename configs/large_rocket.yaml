@@ -1,0 +1,53 @@
+# Large Rocket Configuration
+# For large rocket/launch vehicle applications
+
+experiment_name: "large_rocket"
+output_dir: "./results/large_rocket"
+use_safety_filter: true
+save_models: true
+save_plots: true
+eval_episodes: 80
+eval_seed: 42
+
+# Plant Parameters - Large Rocket (e.g., Falcon 9 first stage size)
+plant:
+  mass: 5.0                    # Heavy vehicle mass (kg, scaled)
+  moment_of_inertia: 2.0       # Large moment of inertia (kg⋅m²)
+  length: 3.0                  # Tall vehicle length (m)
+  nominal_thrust: 50.0         # High thrust force (N)
+  max_gimbal_angle: 0.262      # Limited gimbal range (15 degrees)
+  max_angle: 0.349             # Tight angle limit (20 degrees)
+  max_angular_rate: 2.09       # Conservative max rate (120 deg/s)
+
+# LQR Controller Parameters - Tuned for large vehicle
+lqr:
+  Q: null                      # Auto-generate based on vehicle
+  R: 0.5                       # Lower control penalty (powerful actuators)
+  clg_gamma: 1.5               # Slower CLF for stability
+
+# Safety Filter Parameters - Very conservative for large rocket
+safety:
+  angle_cbf_alpha: 8.0         # Very aggressive angle barrier
+  rate_cbf_alpha: 6.0          # Very aggressive rate barrier
+  clf_penalty: 5000.0          # Very high stability penalty
+
+# Evolution Parameters - More exploration for complex dynamics
+evolution:
+  population_size: 1500        # Larger population for complexity
+  max_generations: 800         # More generations needed
+  sim_duration: 8.0            # Longer simulation time
+  mutation_strength: 0.12      # Larger mutations for exploration
+
+# PPO Parameters - Extended training for large rocket
+ppo:
+  total_frames: 2000000        # More frames needed
+  frames_per_batch: 4096       # Larger batches
+  clip_epsilon: 0.25           # More exploration
+  lr_actor: 0.0002             # Lower learning rate for stability
+  lr_critic: 0.0002            # Lower learning rate for stability
+
+# Simulation Parameters - Robust simulation for large rocket
+simulation:
+  timestep: 0.002              # Coarser timestep (large inertia)
+  control_timestep: 0.02       # Slower control updates
+  max_episode_steps: 1500      # Longer episodes

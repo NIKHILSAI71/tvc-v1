@@ -1,0 +1,53 @@
+# High-Performance Training Configuration
+# For maximum performance and accuracy
+
+experiment_name: "high_performance"
+output_dir: "./results/high_performance"
+use_safety_filter: true
+save_models: true
+save_plots: true
+eval_episodes: 200
+eval_seed: 42
+
+# Plant Parameters - Standard with tight tolerances
+plant:
+  mass: 1.0
+  moment_of_inertia: 0.1
+  length: 1.0
+  nominal_thrust: 15.0
+  max_gimbal_angle: 0.524
+  max_angle: 0.785
+  max_angular_rate: 6.28
+
+# LQR Controller Parameters - High performance
+lqr:
+  Q: null
+  R: 0.8                       # Balanced control penalty
+  clg_gamma: 2.5               # Optimized CLF rate
+
+# Safety Filter Parameters - Balanced safety and performance
+safety:
+  angle_cbf_alpha: 4.0         # Optimized angle barrier
+  rate_cbf_alpha: 3.0          # Optimized rate barrier
+  clf_penalty: 1500.0          # Balanced penalty
+
+# Evolution Parameters - High-performance evolution
+evolution:
+  population_size: 2000        # Very large population
+  max_generations: 1000        # Extended training
+  sim_duration: 6.0            # Longer evaluation
+  mutation_strength: 0.05      # Fine-tuned mutations
+
+# PPO Parameters - Maximum performance training
+ppo:
+  total_frames: 5000000        # Extended training
+  frames_per_batch: 8192       # Large batches for stability
+  clip_epsilon: 0.2            # Standard clipping
+  lr_actor: 0.0001             # Fine-tuned learning rate
+  lr_critic: 0.0003            # Slightly higher critic LR
+
+# Simulation Parameters - High fidelity
+simulation:
+  timestep: 0.0005             # Very fine timestep
+  control_timestep: 0.005      # High-frequency control
+  max_episode_steps: 2000      # Extended episodes

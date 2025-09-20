@@ -1,0 +1,25 @@
+# 3D Gimbal-Only Stabilization Configuration
+
+experiment_name: "gimbal3d_attitude_stabilization"
+output_dir: "./results/gimbal3d"
+use_safety_filter: true
+save_models: true
+save_plots: true
+eval_episodes: 50
+eval_seed: 123
+
+# Plant Parameters
+plant:
+  mass: 1.2
+  moment_of_inertia: 0.12
+  length: 1.1
+  nominal_thrust: 18.0
+  max_gimbal_angle: 0.524   # 30 degrees
+  max_angle: 0.785          # 45 degrees
+  max_angular_rate: 12.56   # 4π rad/s
+
+# Simulation parameters (most timing set via RealLifeSimParams in scripts)
+simulation:
+  timestep: 0.001
+  control_timestep: 0.01
+  max_episode_steps: 1500

@@ -1,0 +1,53 @@
+# Heavy Payload Configuration
+# For rockets carrying heavy payloads
+
+experiment_name: "heavy_payload"
+output_dir: "./results/heavy_payload"
+use_safety_filter: true
+save_models: true
+save_plots: true
+eval_episodes: 100
+eval_seed: 42
+
+# Plant Parameters - Heavy payload configuration
+plant:
+  mass: 2.5                    # Much heavier with payload
+  moment_of_inertia: 0.5       # Higher inertia due to payload
+  length: 1.5                  # Longer vehicle with payload
+  nominal_thrust: 30.0         # Higher thrust needed
+  max_gimbal_angle: 0.349      # Limited gimbal due to structural loads
+  max_angle: 0.524             # Conservative angle limits
+  max_angular_rate: 3.14       # Lower max rates due to inertia
+
+# LQR Controller Parameters - Heavy vehicle tuning
+lqr:
+  Q: null
+  R: 0.8                       # Lower control penalty (need more control authority)
+  clg_gamma: 1.5               # Slower CLF for heavy vehicle
+
+# Safety Filter Parameters - Conservative for heavy payload
+safety:
+  angle_cbf_alpha: 6.0         # Conservative barriers for structural loads
+  rate_cbf_alpha: 5.0
+  clf_penalty: 3000.0          # High penalty for payload safety
+
+# Evolution Parameters - Extended for heavy vehicle complexity
+evolution:
+  population_size: 1200        # Larger population for complex dynamics
+  max_generations: 700         # More generations for heavy vehicle
+  sim_duration: 8.0            # Longer simulation for heavy dynamics
+  mutation_strength: 0.08      # Smaller mutations for precision
+
+# PPO Parameters - Extended training for heavy vehicle
+ppo:
+  total_frames: 2500000        # More training for complex dynamics
+  frames_per_batch: 4096       # Larger batches for stability
+  clip_epsilon: 0.18           # Conservative clipping
+  lr_actor: 0.0001             # Lower learning rate for stability
+  lr_critic: 0.0003
+
+# Simulation Parameters - Robust for heavy vehicle
+simulation:
+  timestep: 0.002              # Larger timestep (high inertia)
+  control_timestep: 0.02       # Slower control for heavy vehicle
+  max_episode_steps: 1800      # Longer episodes for heavy dynamics

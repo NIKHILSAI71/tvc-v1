@@ -1,0 +1,53 @@
+# Aggressive Rocket Configuration
+# For high-performance, agile rocket control
+
+experiment_name: "aggressive_rocket"
+output_dir: "./results/aggressive_rocket"
+use_safety_filter: true
+save_models: true
+save_plots: true
+eval_episodes: 150
+eval_seed: 42
+
+# Plant Parameters - Agile, high-performance rocket
+plant:
+  mass: 0.8                    # Lightweight for agility
+  moment_of_inertia: 0.08      # Low inertia for quick response
+  length: 1.2                  # Slightly longer for stability
+  nominal_thrust: 25.0         # High thrust-to-weight ratio
+  max_gimbal_angle: 0.698      # Large gimbal range (40 degrees)
+  max_angle: 1.047             # Wide angle envelope (60 degrees)
+  max_angular_rate: 10.47      # High angular rates (600 deg/s)
+
+# LQR Controller Parameters - Aggressive control
+lqr:
+  Q: null
+  R: 0.3                       # Low control penalty for aggressiveness
+  clg_gamma: 1.0               # Slower CLF for aggressive maneuvers
+
+# Safety Filter Parameters - Permissive but safe
+safety:
+  angle_cbf_alpha: 2.0         # Less aggressive barriers for performance
+  rate_cbf_alpha: 1.5
+  clf_penalty: 500.0           # Lower penalty for aggressive control
+
+# Evolution Parameters - Exploration for aggressive control
+evolution:
+  population_size: 1200        # Large population for complex behaviors
+  max_generations: 600         # Extended evolution for complexity
+  sim_duration: 7.0            # Longer simulation for aggressive maneuvers
+  mutation_strength: 0.2       # Large mutations for exploration
+
+# PPO Parameters - Aggressive learning
+ppo:
+  total_frames: 2500000        # Extended training for complex behaviors
+  frames_per_batch: 4096       # Large batches
+  clip_epsilon: 0.3            # Higher clipping for exploration
+  lr_actor: 0.0005             # Higher learning rate
+  lr_critic: 0.0008
+
+# Simulation Parameters - High-fidelity for aggressive dynamics
+simulation:
+  timestep: 0.0003             # Very fine timestep for high dynamics
+  control_timestep: 0.003      # High-frequency control
+  max_episode_steps: 2500      # Extended episodes for complex maneuvers

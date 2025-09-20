@@ -1,0 +1,53 @@
+# Safety-Focused Configuration
+# Maximum safety constraints and conservative parameters
+
+experiment_name: "safety_focused"
+output_dir: "./results/safety_focused"
+use_safety_filter: true
+save_models: true
+save_plots: true
+eval_episodes: 120
+eval_seed: 42
+
+# Plant Parameters - Conservative limits
+plant:
+  mass: 1.0
+  moment_of_inertia: 0.1
+  length: 1.0
+  nominal_thrust: 15.0
+  max_gimbal_angle: 0.349      # Reduced to 20 degrees
+  max_angle: 0.524             # Reduced to 30 degrees
+  max_angular_rate: 3.14       # Reduced to π rad/s
+
+# LQR Controller Parameters - Safety-focused
+lqr:
+  Q: null
+  R: 2.0                       # Higher control penalty for smoothness
+  clg_gamma: 5.0               # Fast CLF convergence
+
+# Safety Filter Parameters - Maximum safety
+safety:
+  angle_cbf_alpha: 10.0        # Very aggressive angle barrier
+  rate_cbf_alpha: 8.0          # Very aggressive rate barrier
+  clf_penalty: 10000.0         # Very high stability penalty
+
+# Evolution Parameters - Conservative evolution
+evolution:
+  population_size: 800         # Moderate population
+  max_generations: 600         # More generations for safe solutions
+  sim_duration: 4.0            # Standard simulation time
+  mutation_strength: 0.05      # Small mutations for safety
+
+# PPO Parameters - Conservative learning
+ppo:
+  total_frames: 1500000        # Extended training for safety
+  frames_per_batch: 2048
+  clip_epsilon: 0.1            # Conservative clipping
+  lr_actor: 0.0001             # Low learning rate for stability
+  lr_critic: 0.0002
+
+# Simulation Parameters - Robust simulation
+simulation:
+  timestep: 0.0005             # Fine timestep for accuracy
+  control_timestep: 0.01
+  max_episode_steps: 1200      # Longer episodes for thorough testing

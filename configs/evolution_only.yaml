@@ -1,0 +1,53 @@
+# Evolution-Only Configuration
+# Focus on neuro-evolutionary training (as per video)
+
+experiment_name: "evolution_only"
+output_dir: "./results/evolution_only"
+use_safety_filter: false     # No safety filter for pure evolution
+save_models: true
+save_plots: true
+eval_episodes: 100
+eval_seed: 42
+
+# Plant Parameters - Standard for evolution
+plant:
+  mass: 1.0
+  moment_of_inertia: 0.1
+  length: 1.0
+  nominal_thrust: 15.0
+  max_gimbal_angle: 0.524
+  max_angle: 0.785
+  max_angular_rate: 6.28
+
+# LQR Controller Parameters - Baseline only
+lqr:
+  Q: null
+  R: 1.0
+  clg_gamma: 2.0
+
+# Safety Filter Parameters - Not used but required
+safety:
+  angle_cbf_alpha: 3.0
+  rate_cbf_alpha: 2.0
+  clf_penalty: 1000.0
+
+# Evolution Parameters - Optimized for video approach
+evolution:
+  population_size: 1000        # Exactly as per video
+  max_generations: 1000        # Extended evolution
+  sim_duration: 5.0            # Standard evaluation time
+  mutation_strength: 0.15      # Higher mutation for exploration
+
+# PPO Parameters - Minimal (not used in evolution-only)
+ppo:
+  total_frames: 100000         # Minimal
+  frames_per_batch: 1024
+  clip_epsilon: 0.2
+  lr_actor: 0.0003
+  lr_critic: 0.0003
+
+# Simulation Parameters - Optimized for evolution
+simulation:
+  timestep: 0.001
+  control_timestep: 0.01
+  max_episode_steps: 1000

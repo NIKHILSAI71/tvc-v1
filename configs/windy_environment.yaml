@@ -1,0 +1,62 @@
+# Windy Environment Configuration
+# For testing robustness against disturbances
+
+experiment_name: "windy_environment"
+output_dir: "./results/windy_environment"
+use_safety_filter: true
+save_models: true
+save_plots: true
+eval_episodes: 150
+eval_seed: 42
+
+# Plant Parameters - Standard rocket with disturbance considerations
+plant:
+  mass: 1.0
+  moment_of_inertia: 0.1
+  length: 1.0
+  nominal_thrust: 15.0
+  max_gimbal_angle: 0.524
+  max_angle: 0.785
+  max_angular_rate: 6.28
+
+# LQR Controller Parameters - Robust control
+lqr:
+  Q: null
+  R: 1.5                       # Higher control penalty for robustness
+  clg_gamma: 3.0               # Faster CLF for disturbance rejection
+
+# Safety Filter Parameters - Conservative for disturbances
+safety:
+  angle_cbf_alpha: 4.0         # More aggressive barriers for disturbances
+  rate_cbf_alpha: 3.5
+  clf_penalty: 2000.0          # Higher penalty for robustness
+
+# Evolution Parameters - Robust evolution
+evolution:
+  population_size: 1500        # Larger population for robustness
+  max_generations: 800         # Extended evolution for robust solutions
+  sim_duration: 6.0            # Longer simulation with disturbances
+  mutation_strength: 0.12      # Larger mutations for robustness
+
+# PPO Parameters - Robust learning
+ppo:
+  total_frames: 2000000        # Extended training for robustness
+  frames_per_batch: 3072       # Larger batches for stable learning
+  clip_epsilon: 0.15           # Conservative clipping
+  lr_actor: 0.0002             # Lower learning rate for stability
+  lr_critic: 0.0004
+
+# Simulation Parameters - Disturbance simulation
+simulation:
+  timestep: 0.0008             # Finer timestep for disturbance dynamics
+  control_timestep: 0.008      # Higher frequency control for disturbances
+  max_episode_steps: 1500      # Longer episodes for disturbance handling
+
+# Additional parameters for windy environment (would be used in simulation)
+# These are environment-specific and would be passed to MuJoCo
+wind_parameters:
+  wind_speed_mean: 2.0         # Mean wind speed (m/s)
+  wind_speed_std: 1.0          # Wind speed variation
+  wind_direction_std: 0.5      # Wind direction variation (rad)
+  gust_frequency: 0.1          # Frequency of wind gusts
+  gust_intensity: 3.0          # Intensity of wind gusts

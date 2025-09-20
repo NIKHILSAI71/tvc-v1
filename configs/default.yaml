@@ -1,0 +1,53 @@
+# Default TVC Configuration
+# This is the baseline configuration with standard parameters
+
+experiment_name: "default_tvc"
+output_dir: "./results/default"
+use_safety_filter: true
+save_models: true
+save_plots: true
+eval_episodes: 100
+eval_seed: 42
+
+# Plant Parameters - Standard TVC Vehicle
+plant:
+  mass: 1.0                    # Vehicle mass (kg)
+  moment_of_inertia: 0.1       # Moment of inertia (kg⋅m²)
+  length: 1.0                  # Vehicle length (m)
+  nominal_thrust: 15.0         # Nominal thrust force (N)
+  max_gimbal_angle: 0.524      # Max gimbal angle (30 degrees in rad)
+  max_angle: 0.785             # Max vehicle angle (45 degrees in rad)
+  max_angular_rate: 6.28       # Max angular rate (2π rad/s)
+
+# LQR Controller Parameters
+lqr:
+  Q: null                      # State weight matrix (null = auto-generate)
+  R: 1.0                       # Control weight
+  clg_gamma: 2.0               # CLF decay rate
+
+# Safety Filter Parameters
+safety:
+  angle_cbf_alpha: 3.0         # Angle barrier function coefficient
+  rate_cbf_alpha: 2.0          # Rate barrier function coefficient
+  clf_penalty: 1000.0          # CLF violation penalty
+
+# Evolution Parameters
+evolution:
+  population_size: 1000        # Population size (as per video)
+  max_generations: 500         # Maximum generations
+  sim_duration: 5.0            # Simulation time per episode (s)
+  mutation_strength: 0.1       # Mutation standard deviation
+
+# PPO Parameters
+ppo:
+  total_frames: 1000000        # Total training frames
+  frames_per_batch: 2048       # Frames per batch
+  clip_epsilon: 0.2            # PPO clipping parameter
+  lr_actor: 0.0003             # Actor learning rate
+  lr_critic: 0.0003            # Critic learning rate
+
+# Simulation Parameters
+simulation:
+  timestep: 0.001              # Physics timestep (s)
+  control_timestep: 0.01       # Control update rate (s)
+  max_episode_steps: 1000      # Max steps per episode

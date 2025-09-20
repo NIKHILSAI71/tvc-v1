@@ -1,0 +1,60 @@
+# Development Configuration
+# For development and debugging
+
+experiment_name: "development"
+output_dir: "./results/development"
+use_safety_filter: true
+save_models: false           # Don't save models during development
+save_plots: true
+eval_episodes: 10            # Very few episodes for quick testing
+eval_seed: 42
+
+# Plant Parameters - Standard for development
+plant:
+  mass: 1.0
+  moment_of_inertia: 0.1
+  length: 1.0
+  nominal_thrust: 15.0
+  max_gimbal_angle: 0.524
+  max_angle: 0.785
+  max_angular_rate: 6.28
+
+# LQR Controller Parameters
+lqr:
+  Q: null
+  R: 1.0
+  clg_gamma: 2.0
+
+# Safety Filter Parameters
+safety:
+  angle_cbf_alpha: 3.0
+  rate_cbf_alpha: 2.0
+  clf_penalty: 1000.0
+
+# Evolution Parameters - Minimal for development
+evolution:
+  population_size: 20          # Very small for quick testing
+  max_generations: 5           # Few generations
+  sim_duration: 1.0            # Short simulation
+  mutation_strength: 0.1
+
+# PPO Parameters - Minimal for development
+ppo:
+  total_frames: 10000          # Very minimal training
+  frames_per_batch: 256        # Small batches
+  clip_epsilon: 0.2
+  lr_actor: 0.01               # High LR for quick results
+  lr_critic: 0.01
+
+# Simulation Parameters - Fast for development
+simulation:
+  timestep: 0.01               # Coarse timestep for speed
+  control_timestep: 0.05       # Slow control for speed
+  max_episode_steps: 200       # Very short episodes
+
+# Development-specific settings
+development_settings:
+  verbose_logging: true        # Detailed logging for debugging
+  checkpoint_frequency: 5      # Save checkpoints frequently
+  plot_during_training: true   # Show plots during training
+  early_stopping: true        # Stop early if converged
