@@ -40,6 +40,7 @@ from .networks import ResidualPolicyNetwork, ValueNetwork, create_residual_polic
 from ..dynamics import TVCPlant, TVCParameters
 from ..control import MPCController, CLFCBFQPFilter
 from ..utils.training_scenarios import ScenarioGenerator, TrainingScenario
+from ..utils.curriculum_learning import CurriculumManager, create_adaptive_curriculum
 
 
 @dataclass
@@ -92,7 +93,9 @@ class TVCResidualEnv(EnvBase):
                  plant_params: TVCParameters,
                  ppo_params: PPOParameters,
                  use_safety_filter: bool = True,
-                 device: str = "cpu"):
+                 device: str = "cpu",
+                 scenario_gen: Optional[ScenarioGenerator] = None,
+                 curriculum: Optional[CurriculumManager] = None):
         
         super().__init__(device=device)
         
@@ -108,10 +111,17 @@ class TVCResidualEnv(EnvBase):
             self.safety_filter = CLFCBFQPFilter(self.plant, self.lqr)
         else:
             self.safety_filter = None
-        
+
+        # Scenarios / curriculum
+        self.scenario_gen = scenario_gen
+        self.curriculum = curriculum
+        self.current_scenario: Optional[TrainingScenario] = None
+
         # Environment state
         self.step_count = 0
         self.episode_reward = 0.0
+        self.env_dt = 0.005
+        self.episode_max_steps = int(self.ppo_params.max_episode_length)
         
         # Define observation and action specs
         self._make_specs()
@@ -142,9 +152,30 @@ class TVCResidualEnv(EnvBase):
     
     def _reset(self, tensordict: TensorDict, **kwargs) -> TensorDict:
         """Reset environment to initial state"""
-        # Random initial conditions
-        initial_angle = np.random.uniform(-0.2, 0.2)  # ±11 degrees
-        initial_rate = np.random.uniform(-0.3, 0.3)   # ±0.3 rad/s
+        # Pick scenario if enabled
+        self.current_scenario = None
+        if self.ppo_params.use_scenarios and self.scenario_gen is not None:
+            if self.ppo_params.scenario_curriculum and self.curriculum is not None:
+                self.current_scenario = self.curriculum.get_next_scenario()
+            else:
+                all_scen = self.scenario_gen.scenarios
+                idx = np.random.choice(len(all_scen))
+                self.current_scenario = all_scen[idx]
+        
+        # Initial conditions
+        if self.current_scenario is not None:
+            initial_angle = np.random.uniform(*self.current_scenario.initial_angle_range)
+            initial_rate = np.random.uniform(*self.current_scenario.initial_rate_range)
+            # Cap episode length by scenario duration
+            self.episode_max_steps = min(
+                int(self.ppo_params.max_episode_length),
+                max(1, int(getattr(self.current_scenario, 'episode_duration', self.episode_max_steps * self.env_dt) / self.env_dt))
+            )
+        else:
+            # Random initial conditions (default)
+            initial_angle = np.random.uniform(-0.2, 0.2)  # ±11 degrees
+            initial_rate = np.random.uniform(-0.3, 0.3)   # ±0.3 rad/s
+            self.episode_max_steps = int(self.ppo_params.max_episode_length)
         
         self.plant.reset(np.array([initial_angle, initial_rate]))
         self.step_count = 0
@@ -192,14 +223,14 @@ class TVCResidualEnv(EnvBase):
             safety_intervention = False
         
         # Step plant
-        next_state = self.plant.step(u_safe, dt=0.005, add_disturbance=True)
+        next_state = self.plant.step(u_safe, dt=self.env_dt, add_disturbance=True)
         
         # Compute reward
         reward = self._compute_reward(current_state, residual_action, u_safe, safety_intervention)
         
         # Check termination conditions
         self.step_count += 1
-        terminated = (self.step_count >= self.ppo_params.max_episode_length or 
+        terminated = (self.step_count >= self.episode_max_steps or 
                  not self.plant.is_safe())
         
         # Create observation tensors (current and next)
@@ -296,8 +327,23 @@ class ResidualPPOTrainer:
         self.use_safety_filter = use_safety_filter
         self.device = device
         
+        # Scenarios / Curriculum
+        self.scenario_gen: Optional[ScenarioGenerator] = None
+        self.curriculum: Optional[CurriculumManager] = None
+        if self.ppo_params.use_scenarios:
+            self.scenario_gen = ScenarioGenerator()
+            if self.ppo_params.scenario_curriculum:
+                self.curriculum = create_adaptive_curriculum(self.scenario_gen)
+
         # Create environment
-        self.env = TVCResidualEnv(plant_params, self.ppo_params, use_safety_filter, device)
+        self.env = TVCResidualEnv(
+            plant_params,
+            self.ppo_params,
+            use_safety_filter,
+            device,
+            scenario_gen=self.scenario_gen,
+            curriculum=self.curriculum,
+        )
         
     # Optionally check environment specs (disabled to avoid rollout issues during init)
     # check_env_specs(self.env)
@@ -489,6 +535,10 @@ class ResidualPPOTrainer:
                       f"Frames {frames_collected:8,}/{self.ppo_params.total_frames:,} "
                       f"Reward {mean_reward:6.2f} "
                       f"Length {mean_length:5.1f}")
+
+            # Periodically update curriculum with short evaluations
+            if self.curriculum is not None and i % 5 == 0:
+                self._update_curriculum()
         
         training_time = time.time() - start_time
         
@@ -502,6 +552,33 @@ class ResidualPPOTrainer:
             'training_time': training_time,
             'total_frames': frames_collected
         }
+
+    def _update_curriculum(self, episodes: int = 3):
+        """Evaluate current policy on curriculum scenarios and record results"""
+        if self.curriculum is None:
+            return
+        for _ in range(episodes):
+            scenario = self.curriculum.get_next_scenario()
+            # Run one short evaluation episode
+            td = self.env.reset()
+            done = False
+            steps = 0
+            max_steps = getattr(self.env, 'episode_max_steps', self.ppo_params.max_episode_length)
+            last_obs = td['observation']
+            while not done and steps < max_steps:
+                with torch.no_grad():
+                    act_td = self.actor(TensorDict({'observation': last_obs}, batch_size=()))
+                step_td = self.env.step(act_td)
+                done = step_td['next', 'done'].item()
+                last_obs = step_td['next', 'observation']
+                steps += 1
+            # Get final state from env's plant
+            final_state = self.env.plant.get_observation(add_noise=False)
+            success = (abs(final_state[0]) <= scenario.max_stable_angle and abs(final_state[1]) <= scenario.max_stable_rate)
+            self.curriculum.record_episode_result(scenario.name, bool(success), {
+                'final_angle': float(final_state[0]),
+                'final_rate': float(final_state[1])
+            })
     
     def evaluate_policy(self, num_episodes: int = 10) -> Dict:
         """Evaluate trained policy"""
