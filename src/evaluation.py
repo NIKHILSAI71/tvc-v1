@@ -702,12 +702,3 @@ def test_evaluation_framework():
     
     print("Evaluation framework test completed!")
 
-
-if __name__ == "__main__":
-    # Run test or full comparison
-    import sys
-    
-    if len(sys.argv) > 1 and sys.argv[1] == "test":
-        test_evaluation_framework()
-    else:
-        results, evaluator = run_comparison_experiment()
