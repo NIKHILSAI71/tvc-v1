@@ -24,7 +24,6 @@ from typing import Optional, List, Tuple, Dict
 from dataclasses import dataclass
 
 from ..dynamics import TVCPlant, TVCParameters
-from .lqr import LQRController
 
 
 @dataclass 
@@ -85,8 +84,8 @@ class CBFBarrier:
         g_x = plant.g(state)
         
         # Lie derivatives
-        L_f_h = grad_h.T @ f_x
-        L_g_h = grad_h.T @ g_x
+        L_f_h = float(grad_h.T @ f_x)
+        L_g_h = float(grad_h.T @ g_x)
         
         # Class-K function: α(h) = α * h (could be more complex)
         alpha_h = self.alpha * h_val
@@ -146,11 +145,13 @@ class CLFCBFQPFilter:
     
     def __init__(self, 
                  plant: TVCPlant,
-                 lqr_controller: LQRController,
+                 stabilizing_controller,
                  safety_params: Optional[SafetyParameters] = None):
         
         self.plant = plant
-        self.lqr = lqr_controller
+        # Controller must provide clf_constraint_coefficients(state, reference)
+        # and control(state, reference)
+        self.lqr = stabilizing_controller
         self.params = safety_params or SafetyParameters()
         
         # Initialize barrier functions
@@ -202,6 +203,17 @@ class CLFCBFQPFilter:
             }
         
         # Solve QP
+        if self.qp_solver is None:
+            return {
+                'control': desired_control,
+                'slack': 0.0,
+                'feasible': False,
+                'solve_time': 0.0,
+                'status': 'solver_unavailable',
+                'barrier_values': self._get_barrier_values(state),
+                'intervention': False,
+                'desired_control': desired_control,
+            }
         result = self.qp_solver.solve()
         
         # Extract solution
@@ -341,7 +353,8 @@ def test_cbf_qp_filter():
     # Create system components
     params = TVCParameters()
     plant = TVCPlant(params)
-    lqr = LQRController(plant)
+    from .mpc import MPCController
+    lqr = MPCController(plant)
     
     safety_params = SafetyParameters(
         angle_cbf_alpha=3.0,
@@ -352,13 +365,13 @@ def test_cbf_qp_filter():
     safety_filter = CLFCBFQPFilter(plant, lqr, safety_params)
     
     # Test 1: Safe state with LQR control
-    print("\n1. Testing safe state with LQR control:")
+    print("\n1. Testing safe state with MPC control:")
     safe_state = np.array([0.1, 0.05])  # Small angle and rate
     u_lqr = lqr.control(safe_state)
     
     result = safety_filter.filter_control(u_lqr, safe_state)
     print(f"State: {safe_state}")
-    print(f"LQR control: {u_lqr:.4f}")
+    print(f"Baseline control: {u_lqr:.4f}")
     print(f"Filtered control: {result['control']:.4f}")
     print(f"Slack: {result['slack']:.4f}")
     print(f"Feasible: {result['feasible']}")
