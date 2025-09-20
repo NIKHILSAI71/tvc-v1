@@ -16,7 +16,6 @@ from typing import Dict, List, Optional, Tuple, Any
 import pandas as pd
 from pathlib import Path
 import matplotlib.animation as animation
-from mpl_toolkits.mplot3d import Axes3D
 
 from .metrics import EpisodeMetrics, ExperimentMetrics
 
@@ -512,7 +511,3 @@ def test_visualization():
     
     plt.close('all')  # Close all figures
     print("Visualization system test completed!")
-
-
-if __name__ == "__main__":
-    test_visualization()
