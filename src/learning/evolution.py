@@ -27,7 +27,7 @@ import time
 
 from .networks import SimpleControlNetwork, create_evolution_network
 from ..dynamics import TVCPlant, TVCParameters
-from ..control import CLFCBFQPFilter, LQRController
+from ..control import CLFCBFQPFilter, MPCController
 
 
 @dataclass
@@ -239,8 +239,8 @@ class EvolutionaryTrainer:
         self.safety_filter = None
         if use_safety_filter:
             plant = TVCPlant(plant_params)
-            lqr = LQRController(plant)
-            self.safety_filter = CLFCBFQPFilter(plant, lqr)
+            baseline = MPCController(plant)
+            self.safety_filter = CLFCBFQPFilter(plant, baseline)
         
         # Initialize population
         self.population: List[Individual] = []
