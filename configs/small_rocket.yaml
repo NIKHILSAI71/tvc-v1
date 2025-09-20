@@ -1,0 +1,53 @@
+# Small Rocket Configuration
+# For small rocket/model rocket applications
+
+experiment_name: "small_rocket"
+output_dir: "./results/small_rocket"
+use_safety_filter: true
+save_models: true
+save_plots: true
+eval_episodes: 150
+eval_seed: 42
+
+# Plant Parameters - Small Rocket (e.g., Estes Big Bertha size)
+plant:
+  mass: 0.5                    # Lighter vehicle mass (kg)
+  moment_of_inertia: 0.05      # Smaller moment of inertia (kg⋅m²)
+  length: 0.6                  # Shorter vehicle length (m)
+  nominal_thrust: 8.0          # Lower thrust force (N)
+  max_gimbal_angle: 0.349      # Reduced gimbal range (20 degrees)
+  max_angle: 0.524             # Tighter angle limit (30 degrees)
+  max_angular_rate: 4.19       # Lower max rate (240 deg/s)
+
+# LQR Controller Parameters - Tuned for smaller vehicle
+lqr:
+  Q: null                      # Auto-generate based on vehicle
+  R: 2.0                       # Higher control penalty for precision
+  clg_gamma: 3.0               # Faster CLF convergence
+
+# Safety Filter Parameters - Conservative for small rocket
+safety:
+  angle_cbf_alpha: 5.0         # More aggressive angle barrier
+  rate_cbf_alpha: 4.0          # More aggressive rate barrier
+  clf_penalty: 2000.0          # Higher stability penalty
+
+# Evolution Parameters - Faster convergence for simpler dynamics
+evolution:
+  population_size: 500         # Smaller population
+  max_generations: 300         # Fewer generations needed
+  sim_duration: 3.0            # Shorter simulation time
+  mutation_strength: 0.08      # Smaller mutations for precision
+
+# PPO Parameters - Tuned for small rocket
+ppo:
+  total_frames: 750000         # Fewer frames needed
+  frames_per_batch: 1024       # Smaller batches
+  clip_epsilon: 0.15           # Tighter clipping
+  lr_actor: 0.0005             # Higher learning rate
+  lr_critic: 0.0005            # Higher learning rate
+
+# Simulation Parameters - Higher fidelity for small rocket
+simulation:
+  timestep: 0.0005             # Finer timestep for precision
+  control_timestep: 0.005      # Faster control updates
+  max_episode_steps: 800       # Shorter episodes
