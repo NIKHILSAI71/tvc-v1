@@ -41,8 +41,8 @@ from src.utils.config import ExperimentConfig
 class RealLifeSimParams:
     """Enhanced parameters for realistic MuJoCo simulation"""
     # Simulation parameters
-    timestep: float = 0.0005  # Higher precision (0.5ms)
-    control_timestep: float = 0.01  # 100Hz control loop
+    timestep: float = 0.00025  # Higher precision (0.25ms) for real-time accuracy
+    control_timestep: float = 0.005  # 200Hz control loop (matches Falcon 9)
     
     # Rendering
     render_mode: str = "rgb_array"
@@ -56,7 +56,7 @@ class RealLifeSimParams:
     # Environment bounds
     max_angle: float = np.pi/3  # ±60 degrees
     max_rate: float = 4*np.pi   # ±4π rad/s
-    max_episode_steps: int = 2000  # 20 seconds at 100Hz
+    max_episode_steps: int = 4000  # 20 seconds at 200Hz
     
     # Environmental conditions
     wind_speed_mean: float = 0.0     # m/s
@@ -87,9 +87,14 @@ class RealLifeSimParams:
     # Engine and fuel modeling
     enable_fuel_consumption: bool = True        # Realistic fuel usage
     initial_fuel_mass_fraction: float = 0.7    # Fuel as fraction of total mass
+    fuel_consumption_rate: float = 0.1         # kg/s per kN of thrust
     specific_impulse: float = 280.0            # seconds (engine efficiency)
     engine_response_time: float = 0.05         # seconds (throttle response)
     min_throttle_level: float = 0.3            # Minimum engine throttle
+    
+    # Variable mass effects
+    enable_variable_mass: bool = True           # Mass changes due to fuel consumption
+    mass_update_frequency: float = 10.0        # Hz (how often to update mass)
     
     # Performance variations
     enable_engine_degradation: bool = False     # Engine performance degrades over time
@@ -106,11 +111,11 @@ class RealLifeSimParams:
     gps_dropout_rate: float = 0.01        # Probability of GPS signal loss
     
     # Actuator dynamics
-    actuator_delay_steps: int = 2    # 20ms delay
-    actuator_bandwidth: float = 20.0 # Hz
-    actuator_noise_std: float = 0.001 # rad
-    actuator_friction: float = 0.02   # Static friction in actuators
-    actuator_backlash: float = 0.001  # rad (mechanical backlash)
+    actuator_delay_steps: int = 1    # 5ms delay (reduced for faster systems)
+    actuator_bandwidth: float = 50.0 # Hz (modern TVC systems)
+    actuator_noise_std: float = 0.0005 # rad (reduced noise for precision)
+    actuator_friction: float = 0.01   # Static friction in actuators
+    actuator_backlash: float = 0.0005  # rad (mechanical backlash)
     
     # Derived actuator time constant from bandwidth (τ ≈ 1/(2πf))
     @property
@@ -118,12 +123,18 @@ class RealLifeSimParams:
         return 1.0 / max(1e-6, (2.0 * np.pi * self.actuator_bandwidth))
     
     # Optional engine (throttle) lag time constant (separate from response time shaping)
-    thrust_time_constant: float = 0.1
+    thrust_time_constant: float = 0.05  # Faster engine response
     
     # Realistic physics
     enable_aerodynamics: bool = True
     enable_propellant_slosh: bool = True
     enable_structural_flexibility: bool = False  # Advanced feature
+    
+    # Propellant sloshing parameters
+    slosh_frequency: float = 1.5               # Hz (natural frequency of fuel slosh)
+    slosh_damping: float = 0.1                 # Damping ratio
+    slosh_mass_fraction: float = 0.3           # Fraction of fuel that sloshes
+    slosh_amplitude_scale: float = 0.1         # Maximum slosh amplitude as fraction of tank radius
     
     # Advanced aerodynamics
     drag_coefficient: float = 0.5             # Rocket drag coefficient
@@ -1303,7 +1314,3 @@ def test_realistic_env():
             print(f"  ✗ {config_name} test failed: {e}")
     
     print("\nRealistic environment testing completed!")
-
-
-if __name__ == "__main__":
-    test_realistic_env()
