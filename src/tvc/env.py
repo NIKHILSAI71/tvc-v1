@@ -183,7 +183,14 @@ class Tvc2DEnv:
         thrust = float(self.data.ctrl[0])
         pitch = self._pitch()
         pitch_rate = self._pitch_rate()
-        return np.array([thrust, pitch, pitch_rate], dtype=np.float32)
+        lateral = float(self.data.qpos[0])
+        lateral_vel = float(self.data.qvel[0])
+        altitude = float(self.data.qpos[2])
+        vertical_vel = float(self.data.qvel[2])
+        return np.array(
+            [thrust, pitch, pitch_rate, lateral, lateral_vel, altitude, vertical_vel],
+            dtype=np.float32,
+        )
 
     def _pitch(self) -> float:
         quat = np.array(self.data.qpos[3:7])
@@ -201,10 +208,13 @@ class Tvc2DEnv:
         pitch_rate = self._pitch_rate()
         lateral = float(self.data.qpos[0])
         lateral_vel = float(self.data.qvel[0])
+        altitude_error = 4.0 - float(self.data.qpos[2])
+        vertical_vel = float(self.data.qvel[2])
         jerk = float(np.linalg.norm(self.data.qacc[:3]))
         ctrl_smooth = float(np.linalg.norm(np.diff(self.data.ctrl)))
 
         penalty = 4.0 * pitch**2 + 0.5 * pitch_rate**2 + 0.3 * lateral**2 + 0.1 * lateral_vel**2
+        penalty += 0.25 * altitude_error**2 + 0.12 * vertical_vel**2
         penalty += 0.05 * jerk + 0.02 * ctrl_smooth
         reward = float(-penalty)
         return reward, {
@@ -212,6 +222,8 @@ class Tvc2DEnv:
             "pitch_rate": pitch_rate,
             "lateral": lateral,
             "lateral_vel": lateral_vel,
+            "altitude_error": altitude_error,
+            "vertical_velocity": vertical_vel,
             "jerk": jerk,
         }
 
