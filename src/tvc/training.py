@@ -51,6 +51,9 @@ class PpoEvolutionConfig:
     mpc_interval: int = 3
     evaluation_episodes: int = 3
     evaluation_max_steps: int = 250
+    policy_eval_interval: int = 3
+    policy_eval_episodes: Optional[int] = None
+    policy_eval_max_steps: Optional[int] = None
     value_clip_epsilon: float = 0.2
     grad_clip_norm: float = 1.0
     use_lr_schedule: bool = True
@@ -107,8 +110,14 @@ class TrainingState:
 @dataclass
 class RunningNormalizer:
     count: float = 0.0
-    mean: jnp.ndarray = field(default_factory=lambda: jnp.zeros((3,), dtype=jnp.float32))
-    m2: jnp.ndarray = field(default_factory=lambda: jnp.zeros((3,), dtype=jnp.float32))
+    mean: jnp.ndarray = field(default_factory=lambda: jnp.zeros((0,), dtype=jnp.float32))
+    m2: jnp.ndarray = field(default_factory=lambda: jnp.zeros((0,), dtype=jnp.float32))
+
+    @classmethod
+    def initialise(cls, observation: jnp.ndarray) -> "RunningNormalizer":
+        obs = jnp.asarray(observation, dtype=jnp.float32)
+        zeros = jnp.zeros_like(obs)
+        return cls(count=0.0, mean=zeros, m2=zeros)
 
 
 def _build_optimizer(
@@ -145,6 +154,8 @@ def _build_optimizer(
 
 def _update_normalizer(rms: RunningNormalizer, observation: jnp.ndarray) -> RunningNormalizer:
     obs = jnp.asarray(observation, dtype=jnp.float32)
+    if rms.mean.size == 0 or rms.mean.shape != obs.shape or rms.count < 1.0:
+        return RunningNormalizer(count=1.0, mean=obs, m2=jnp.zeros_like(obs))
     count = rms.count + 1.0
     delta = obs - rms.mean
     mean = rms.mean + delta / count
@@ -155,7 +166,7 @@ def _update_normalizer(rms: RunningNormalizer, observation: jnp.ndarray) -> Runn
 
 def _normalize_observation(rms: RunningNormalizer, observation: jnp.ndarray) -> jnp.ndarray:
     obs = jnp.asarray(observation, dtype=jnp.float32)
-    if rms.count < 1.0:
+    if rms.mean.size == 0 or rms.mean.shape != obs.shape or rms.count < 1.0:
         return obs
     variance = rms.m2 / rms.count
     variance = jnp.maximum(variance, 1e-6)
@@ -210,29 +221,8 @@ def train_controller(
     """Runs PPO with evolutionary refinement and MPC guided actions."""
 
     policy_funcs = build_policy_network(config.policy_config)
-    sample_obs = jnp.zeros((3,), dtype=jnp.float32)
-    params = policy_funcs.init(rng, sample_obs)
-
-    updates_per_epoch = max(1, math.ceil(config.rollout_length / config.minibatch_size))
-    total_updates = total_episodes * config.num_epochs * updates_per_epoch
-    optimiser, lr_schedule = _build_optimizer(config, total_updates)
-    opt_state = optimiser.init(params)
-
     curriculum = build_curriculum()
-    elites: List[Dict[str, object]] = []
-    state = TrainingState(
-        params=params,
-        opt_state=opt_state,
-        elites=elites,
-        rng=rng,
-        obs_rms=RunningNormalizer(),
-        lr_schedule=lr_schedule,
-        current_stage_name=curriculum[0].name if curriculum else None,
-    )
-    if config.adaptive_lr_enabled and curriculum:
-        initial_bias = config.stage_lr_bias.get(curriculum[0].name)
-        if initial_bias is not None:
-            state.lr_scale = float(np.clip(initial_bias, config.adaptive_lr_min_scale, config.adaptive_lr_max_scale))
+    initial_stage = curriculum[0] if curriculum else None
     logger = logging.getLogger("tvc.training")
 
     try:
@@ -240,6 +230,42 @@ def train_controller(
             env.apply_rocket_params(config.params)
     except Exception as exc:  # pragma: no cover - defensive path
         logger.warning("Unable to apply rocket parameters to environment: %s", exc)
+
+    disturbance_scale = float(initial_stage.disturbance_scale) if initial_stage else 1.0
+    sample_obs = jnp.asarray(env.reset(disturbance_scale=disturbance_scale), dtype=jnp.float32)
+    rng, init_key = jax.random.split(rng)
+    params = policy_funcs.init(init_key, sample_obs)
+
+    updates_per_epoch = max(1, math.ceil(config.rollout_length / config.minibatch_size))
+    total_updates = total_episodes * config.num_epochs * updates_per_epoch
+    optimiser, lr_schedule = _build_optimizer(config, total_updates)
+    opt_state = optimiser.init(params)
+
+    eval_env: Optional[Tvc2DEnv] = None
+    if config.policy_eval_interval and config.policy_eval_interval > 0:
+        rng, eval_key = jax.random.split(rng)
+        eval_seed = int(jax.random.randint(eval_key, shape=(), minval=0, maxval=2**31 - 1))
+        eval_env = Tvc2DEnv(max_steps=env.max_steps, seed=eval_seed)
+        try:
+            if hasattr(eval_env, "apply_rocket_params"):
+                eval_env.apply_rocket_params(config.params)
+        except Exception as exc:  # pragma: no cover - defensive path
+            logger.warning("Unable to apply rocket parameters to evaluation environment: %s", exc)
+
+    elites: List[Dict[str, object]] = []
+    state = TrainingState(
+        params=params,
+        opt_state=opt_state,
+        elites=elites,
+        rng=rng,
+        obs_rms=RunningNormalizer.initialise(sample_obs),
+        lr_schedule=lr_schedule,
+        current_stage_name=curriculum[0].name if curriculum else None,
+    )
+    if config.adaptive_lr_enabled and curriculum:
+        initial_bias = config.stage_lr_bias.get(curriculum[0].name)
+        if initial_bias is not None:
+            state.lr_scale = float(np.clip(initial_bias, config.adaptive_lr_min_scale, config.adaptive_lr_max_scale))
 
     logger.info("Beginning training run for %s episodes", total_episodes)
 
@@ -264,6 +290,22 @@ def train_controller(
         effective_lr = float(base_lr) * state.lr_scale
         stage, stage_metrics = _update_stage_progress(state, curriculum, stage, episode_return, logger, config)
 
+        evaluation_metrics: Dict[str, Any] = {}
+        if eval_env is not None and config.policy_eval_interval > 0 and (episode + 1) % config.policy_eval_interval == 0:
+            eval_episodes = config.policy_eval_episodes or config.evaluation_episodes
+            eval_max_steps = config.policy_eval_max_steps or config.evaluation_max_steps
+            eval_return = _evaluate_candidate(
+                eval_env,
+                stage,
+                state.params,
+                policy_funcs,
+                config,
+                state.obs_rms,
+                episodes=eval_episodes,
+                max_steps=eval_max_steps,
+            )
+            evaluation_metrics["policy_eval_return"] = float(eval_return)
+
         episode_metrics: Dict[str, Any] = {
             "episode": float(episode + 1),
             "stage": stage_name,
@@ -281,6 +323,7 @@ def train_controller(
         if state.last_aux:
             episode_metrics.update(state.last_aux)
         episode_metrics.update(stage_metrics)
+        episode_metrics.update(evaluation_metrics)
 
         if config.use_plateau_schedule:
             if episode_return > state.best_return + config.plateau_threshold:
@@ -681,6 +724,9 @@ def _evaluate_candidate(
     funcs,
     config: PpoEvolutionConfig,
     normalizer: RunningNormalizer,
+    *,
+    episodes: Optional[int] = None,
+    max_steps: Optional[int] = None,
 ) -> float:
     total = 0.0
     base_normalizer = RunningNormalizer(
@@ -688,13 +734,15 @@ def _evaluate_candidate(
         mean=jnp.array(normalizer.mean, copy=True),
         m2=jnp.array(normalizer.m2, copy=True),
     )
-    for _ in range(config.evaluation_episodes):
+    eval_episodes = episodes if episodes is not None else config.evaluation_episodes
+    eval_max_steps = max_steps if max_steps is not None else config.evaluation_max_steps
+    for _ in range(eval_episodes):
         obs = jnp.asarray(env.reset(disturbance_scale=stage.disturbance_scale), dtype=jnp.float32)
         local_rms = _update_normalizer(base_normalizer, obs)
         norm_obs = _normalize_observation(local_rms, obs)
         done = False
         steps = 0
-        while not done and steps < config.evaluation_max_steps:
+        while not done and steps < eval_max_steps:
             action = funcs.actor(params, norm_obs, None, True)
             result = env.step(np.array(action))
             total += result.reward
@@ -704,7 +752,7 @@ def _evaluate_candidate(
             done = result.done
             steps += 1
         base_normalizer = local_rms
-    return total / max(1, config.evaluation_episodes)
+    return total / max(1, eval_episodes)
 
 
 def save_training_artifacts(
