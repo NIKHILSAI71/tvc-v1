@@ -48,7 +48,7 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     train_parser.add_argument(
         "--output-root",
         type=Path,
-        default=Path("trainning"),
+        default=Path("training"),
         help="Directory where per-run artifacts will be stored",
     )
     train_parser.add_argument(
