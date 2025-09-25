@@ -12,8 +12,8 @@ authors = [
 requires-python = ">=3.10"
 dependencies = [
   "mujoco>=3.1.4",
-  "jax>=0.4.28",
-  "jaxlib>=0.4.28",
+  "jax~=0.7.2",
+  "jaxlib~=0.7.2",
   "flax>=0.8.5",
   "optax>=0.2.2",
   "rlax>=0.1.8",
@@ -23,6 +23,12 @@ dependencies = [
   "tqdm>=4.66.5",
   "warp-lang>=1.9.0",
   "mujoco-mjx>=3.3.6"
+]
+
+[project.optional-dependencies]
+gpu = [
+  "jax-cuda12-plugin[with-cuda]~=0.7.2 ; platform_system == 'Linux'",
+  "jax-cuda12-pjrt~=0.7.2 ; platform_system == 'Linux'",
 ]
 
 [tool.setuptools.packages.find]
