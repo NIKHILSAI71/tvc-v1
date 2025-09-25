@@ -11,8 +11,8 @@ if __package__ in (None, ""):
     __package__ = "tvc"
 
 import logging
-from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -30,27 +30,68 @@ from .policies import PolicyConfig, build_policy_network, mutate_parameters
 class PpoEvolutionConfig:
     """Aggregates PPO and evolutionary hyperparameters."""
 
-    gamma: float = 0.985
-    lam: float = 0.92
-    learning_rate: float = 3e-4
-    clip_epsilon: float = 0.18
-    rollout_length: int = 1024
-    num_epochs: int = 4
-    minibatch_size: int = 256
-    mutation_scale: float = 0.015
-    population_size: int = 16
-    elite_keep: int = 4
+    gamma: float = 0.99
+    lam: float = 0.95
+    learning_rate: float = 8e-4
+    clip_epsilon: float = 0.2
+    rollout_length: int = 256
+    num_epochs: int = 5
+    minibatch_size: int = 128
+    mutation_scale: float = 0.02
+    population_size: int = 8
+    elite_keep: int = 2
     policy_config: PolicyConfig = PolicyConfig()
-    mpc_config: MpcConfig = MpcConfig()
+    mpc_config: MpcConfig = MpcConfig(horizon=12, iterations=12, learning_rate=0.06)
     params: RocketParams = RocketParams()
+    mpc_interval: int = 3
+    evaluation_episodes: int = 1
+    evaluation_max_steps: int = 250
+    value_clip_epsilon: float = 0.2
+    grad_clip_norm: float = 1.0
 
 
 @dataclass
 class TrainingState:
-    params: Dict[str, object]
+    params: Any
     opt_state: optax.OptState
-    elites: List[Dict[str, object]]
-    rng: jax.random.KeyArray
+    elites: List[Any]
+    rng: jax.Array
+    obs_rms: "RunningNormalizer"
+
+
+@dataclass
+class RunningNormalizer:
+    count: float = 0.0
+    mean: jnp.ndarray = field(default_factory=lambda: jnp.zeros((3,), dtype=jnp.float32))
+    m2: jnp.ndarray = field(default_factory=lambda: jnp.zeros((3,), dtype=jnp.float32))
+
+
+def _build_optimizer(config: PpoEvolutionConfig) -> optax.GradientTransformation:
+    if config.grad_clip_norm and config.grad_clip_norm > 0.0:
+        return optax.chain(
+            optax.clip_by_global_norm(config.grad_clip_norm),
+            optax.adam(config.learning_rate),
+        )
+    return optax.adam(config.learning_rate)
+
+
+def _update_normalizer(rms: RunningNormalizer, observation: jnp.ndarray) -> RunningNormalizer:
+    obs = jnp.asarray(observation, dtype=jnp.float32)
+    count = rms.count + 1.0
+    delta = obs - rms.mean
+    mean = rms.mean + delta / count
+    delta2 = obs - mean
+    m2 = rms.m2 + delta * delta2
+    return RunningNormalizer(count=count, mean=mean, m2=m2)
+
+
+def _normalize_observation(rms: RunningNormalizer, observation: jnp.ndarray) -> jnp.ndarray:
+    obs = jnp.asarray(observation, dtype=jnp.float32)
+    if rms.count < 1.0:
+        return obs
+    variance = rms.m2 / rms.count
+    variance = jnp.maximum(variance, 1e-6)
+    return (obs - rms.mean) / jnp.sqrt(variance)
 
 
 def _gather_state(env: Tvc2DEnv) -> jnp.ndarray:
@@ -94,7 +135,7 @@ def _compute_gae(
 def train_controller(
     env: Tvc2DEnv,
     total_episodes: int,
-    rng: jax.random.KeyArray,
+    rng: jax.Array,
     config: PpoEvolutionConfig = PpoEvolutionConfig(),
 ) -> TrainingState:
     """Runs PPO with evolutionary refinement and MPC guided actions."""
@@ -103,12 +144,12 @@ def train_controller(
     sample_obs = jnp.zeros((3,), dtype=jnp.float32)
     params = policy_funcs.init(rng, sample_obs)
 
-    optimiser = optax.adam(config.learning_rate)
+    optimiser = _build_optimizer(config)
     opt_state = optimiser.init(params)
 
     curriculum = build_curriculum()
     elites: List[Dict[str, object]] = []
-    state = TrainingState(params=params, opt_state=opt_state, elites=elites, rng=rng)
+    state = TrainingState(params=params, opt_state=opt_state, elites=elites, rng=rng, obs_rms=RunningNormalizer())
     logger = logging.getLogger("tvc.training")
 
     logger.info("Beginning training run for %s episodes", total_episodes)
@@ -152,34 +193,53 @@ def _collect_rollout(
     value_buffer: List[float] = []
     done_buffer: List[float] = []
 
-    observation = jnp.asarray(env.reset(disturbance_scale=stage.disturbance_scale))
-    for _ in range(config.rollout_length):
+    observation = jnp.asarray(env.reset(disturbance_scale=stage.disturbance_scale), dtype=jnp.float32)
+    obs_rms = state.obs_rms
+    obs_rms = _update_normalizer(obs_rms, observation)
+    norm_observation = _normalize_observation(obs_rms, observation)
+    mpc_interval = max(1, int(config.mpc_interval))
+    cached_mpc_action = jnp.zeros(2, dtype=jnp.float32)
+    for step in range(config.rollout_length):
         state.rng, policy_key = jax.random.split(state.rng)
-        mean, log_std, value = funcs.distribution(state.params, observation)
+        mean, log_std, value = funcs.distribution(state.params, norm_observation)
         std = jnp.exp(log_std)
         epsilon = jax.random.normal(policy_key, shape=mean.shape)
         policy_action = mean + std * epsilon
-        rocket_state = _gather_state(env)
-        mpc_action, _ = compute_tvc_mpc_action(rocket_state, stage.target_state, config.params, config.mpc_config)
-        combined_action = jnp.clip(policy_action + mpc_action, -config.mpc_config.control_limit, config.mpc_config.control_limit)
+        if step % mpc_interval == 0:
+            rocket_state = _gather_state(env)
+            cached_mpc_action, _ = compute_tvc_mpc_action(
+                rocket_state,
+                stage.target_state,
+                config.params,
+                config.mpc_config,
+            )
+        combined_action = jnp.clip(
+            policy_action + cached_mpc_action,
+            -config.mpc_config.control_limit,
+            config.mpc_config.control_limit,
+        )
 
         log_prob = _gaussian_log_prob(mean, log_std, policy_action)
 
         result: StepResult = env.step(np.array(combined_action))
 
-        obs_buffer.append(observation)
+        obs_buffer.append(norm_observation)
         action_buffer.append(policy_action)
         logprob_buffer.append(float(log_prob))
         reward_buffer.append(result.reward)
         value_buffer.append(float(value))
         done_buffer.append(float(result.done))
 
-        observation = jnp.asarray(result.observation)
+        observation = jnp.asarray(result.observation, dtype=jnp.float32)
+        obs_rms = _update_normalizer(obs_rms, observation)
+        norm_observation = _normalize_observation(obs_rms, observation)
         if result.done:
-            observation = jnp.asarray(env.reset(disturbance_scale=stage.disturbance_scale))
+            observation = jnp.asarray(env.reset(disturbance_scale=stage.disturbance_scale), dtype=jnp.float32)
+            obs_rms = _update_normalizer(obs_rms, observation)
+            norm_observation = _normalize_observation(obs_rms, observation)
 
     # Bootstrap value for final state.
-    value_buffer.append(float(funcs.value(state.params, observation)))
+    value_buffer.append(float(funcs.value(state.params, norm_observation)))
 
     batch = {
         "observations": jnp.stack(obs_buffer),
@@ -189,6 +249,7 @@ def _collect_rollout(
         "values": jnp.array(value_buffer),
         "dones": jnp.array(done_buffer),
     }
+    state.obs_rms = obs_rms
     return batch
 
 
@@ -215,6 +276,7 @@ def _ppo_update(
         "log_probs": batch["log_probs"],
         "advantages": advantages,
         "returns": returns,
+        "value_preds": batch["values"][:-1],
     }
 
     def loss_fn(params, minibatch):
@@ -223,7 +285,14 @@ def _ppo_update(
         ratio = jnp.exp(log_prob - minibatch["log_probs"])
         clipped = jnp.clip(ratio, 1.0 - config.clip_epsilon, 1.0 + config.clip_epsilon)
         actor_loss = -jnp.mean(jnp.minimum(ratio * minibatch["advantages"], clipped * minibatch["advantages"]))
-        value_loss = 0.5 * jnp.mean((minibatch["returns"] - values) ** 2)
+        value_clipped = minibatch["value_preds"] + jnp.clip(
+            values - minibatch["value_preds"],
+            -config.value_clip_epsilon,
+            config.value_clip_epsilon,
+        )
+        value_loss_unclipped = (minibatch["returns"] - values) ** 2
+        value_loss_clipped = (minibatch["returns"] - value_clipped) ** 2
+        value_loss = 0.5 * jnp.mean(jnp.maximum(value_loss_unclipped, value_loss_clipped))
         entropy = 0.5 * jnp.sum(1.0 + 2.0 * log_std + jnp.log(2.0 * jnp.pi))
         return actor_loss + value_loss - 0.001 * entropy
 
@@ -260,7 +329,7 @@ def _evolutionary_update(
 
     scores = []
     for candidate in population:
-        reward = _evaluate_candidate(env, stage, candidate, funcs)
+        reward = _evaluate_candidate(env, stage, candidate, funcs, config, state.obs_rms)
         scores.append(reward)
 
     elite_indices = np.argsort(scores)[-config.elite_keep :][::-1]
@@ -278,18 +347,29 @@ def _evaluate_candidate(
     stage: CurriculumStage,
     params,
     funcs,
-    episodes: int = 3,
+    config: PpoEvolutionConfig,
+    normalizer: RunningNormalizer,
 ) -> float:
     total = 0.0
-    for _ in range(episodes):
-        obs = jnp.asarray(env.reset(disturbance_scale=stage.disturbance_scale))
+    base_normalizer = RunningNormalizer(
+        count=float(normalizer.count),
+        mean=jnp.array(normalizer.mean, copy=True),
+        m2=jnp.array(normalizer.m2, copy=True),
+    )
+    for _ in range(config.evaluation_episodes):
+        obs = jnp.asarray(env.reset(disturbance_scale=stage.disturbance_scale), dtype=jnp.float32)
+        local_rms = _update_normalizer(base_normalizer, obs)
+        norm_obs = _normalize_observation(local_rms, obs)
         done = False
         steps = 0
-        while not done and steps < 400:
-            action = funcs.actor(params, obs, None, True)
+        while not done and steps < config.evaluation_max_steps:
+            action = funcs.actor(params, norm_obs, None, True)
             result = env.step(np.array(action))
             total += result.reward
-            obs = jnp.asarray(result.observation)
+            obs = jnp.asarray(result.observation, dtype=jnp.float32)
+            local_rms = _update_normalizer(local_rms, obs)
+            norm_obs = _normalize_observation(local_rms, obs)
             done = result.done
             steps += 1
-    return total / episodes
+        base_normalizer = local_rms
+    return total / max(1, config.evaluation_episodes)
