@@ -20,6 +20,7 @@ checks from the terminal.
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from typing import Sequence
 
@@ -33,8 +34,13 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     train_parser = subparsers.add_parser("train", help="Run the PPO + evolution training loop")
     train_parser.add_argument("--episodes", type=int, default=10, help="Number of training episodes to run")
     train_parser.add_argument("--seed", type=int, default=0, help="Seed for the JAX PRNG")
+    train_parser.add_argument("--max-steps", type=int, default=400, help="Maximum environment steps before truncation")
     train_parser.add_argument(
-        "--max-steps", type=int, default=400, help="Maximum environment steps before truncation"
+        "--log-level",
+        default="INFO",
+        choices=("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"),
+        type=str.upper,
+        help="Logging verbosity for training output",
     )
 
     test_parser = subparsers.add_parser("test", help="Execute package smoke tests via pytest")
@@ -47,7 +53,20 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _run_train(episodes: int, seed: int, max_steps: int) -> None:
+def _configure_logging(level: str) -> None:
+    numeric = logging.getLevelName(level)
+    if isinstance(numeric, str):  # unrecognised level name
+        numeric = logging.INFO
+    logging.basicConfig(
+        level=numeric,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        force=True,
+    )
+
+
+def _run_train(episodes: int, seed: int, max_steps: int, log_level: str = "INFO") -> None:
+    _configure_logging(log_level)
+    logger = logging.getLogger("tvc.cli")
     ensure_jax_runtime()
 
     import jax
@@ -55,13 +74,18 @@ def _run_train(episodes: int, seed: int, max_steps: int) -> None:
     from .env import Tvc2DEnv
     from .training import train_controller
 
+    logger.info(
+        "Training started: episodes=%s, seed=%s, max_steps=%s, log_level=%s",
+        episodes,
+        seed,
+        max_steps,
+        log_level,
+    )
     key = jax.random.key(seed)
     env = Tvc2DEnv(max_steps=max_steps)
     state = train_controller(env, total_episodes=episodes, rng=key)
 
-    print("Training finished.")
-    print(f"Episodes: {episodes}")
-    print(f"Elite count: {len(state.elites)}")
+    logger.info("Training finished. episodes=%s elites_retained=%s", episodes, len(state.elites))
 
 
 def _run_tests(pytest_args: Sequence[str] | None) -> int:
@@ -74,7 +98,7 @@ def _run_tests(pytest_args: Sequence[str] | None) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv or sys.argv[1:])
     if args.command == "train":
-        _run_train(args.episodes, args.seed, args.max_steps)
+        _run_train(args.episodes, args.seed, args.max_steps, args.log_level)
         return 0
     if args.command == "test":
         return _run_tests(args.pytest_args)
