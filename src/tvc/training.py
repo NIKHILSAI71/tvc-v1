@@ -10,6 +10,7 @@ if __package__ in (None, ""):
         sys.path.append(str(package_root))
     __package__ = "tvc"
 
+import logging
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
@@ -108,13 +109,32 @@ def train_controller(
     curriculum = build_curriculum()
     elites: List[Dict[str, object]] = []
     state = TrainingState(params=params, opt_state=opt_state, elites=elites, rng=rng)
+    logger = logging.getLogger("tvc.training")
+
+    logger.info("Beginning training run for %s episodes", total_episodes)
 
     for episode in range(total_episodes):
         stage = select_stage(curriculum, episode)
         trajectories = _collect_rollout(env, stage, state, policy_funcs, config)
         state = _ppo_update(state, trajectories, optimiser, policy_funcs, config)
-        state = _evolutionary_update(env, stage, state, policy_funcs, config)
+        episode_return = float(jnp.sum(trajectories["rewards"]))
+        reward_mean = float(jnp.mean(trajectories["rewards"]))
+        state, elite_best, elite_mean = _evolutionary_update(env, stage, state, policy_funcs, config)
 
+        logger.info(
+            "Episode %s/%s | stage=%s (disturbance=%.2f) | rollout_return=%.3f | reward_mean=%.3f | elite_best=%.3f | elite_mean=%.3f | elites=%s",
+            episode + 1,
+            total_episodes,
+            stage.name,
+            stage.disturbance_scale,
+            episode_return,
+            reward_mean,
+            elite_best,
+            elite_mean,
+            len(state.elites),
+        )
+
+    logger.info("Training loop complete. Elites maintained: %s", len(state.elites))
     return state
 
 
@@ -231,7 +251,7 @@ def _evolutionary_update(
     state: TrainingState,
     funcs,
     config: PpoEvolutionConfig,
-) -> TrainingState:
+) -> Tuple[TrainingState, float, float]:
     rng = state.rng
     population = [state.params] + state.elites
     while len(population) < config.population_size:
@@ -247,7 +267,10 @@ def _evolutionary_update(
     elites = [population[i] for i in elite_indices]
     state.elites = elites
     state.rng = rng
-    return state
+
+    best_reward = float(np.max(scores)) if scores else float("nan")
+    mean_reward = float(np.mean(scores)) if scores else float("nan")
+    return state, best_reward, mean_reward
 
 
 def _evaluate_candidate(
