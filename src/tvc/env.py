@@ -9,11 +9,15 @@ parallel scenarios.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Any, Dict, Tuple
 
-import mujoco
+import mujoco as _mujoco
 import numpy as np
 from mujoco import mjx
+
+from .dynamics import RocketParams
+
+mujoco: Any = _mujoco
 
 
 @dataclass
@@ -60,6 +64,34 @@ class Tvc2DEnv:
         self.max_steps = int(max_steps)
         self._rng = np.random.default_rng(seed)
         self._step_counter = 0
+        mujoco.mj_forward(self.model, self.data)
+
+    def apply_rocket_params(self, params: RocketParams | None) -> None:
+        """Reconfigures the MuJoCo model to match supplied physical parameters."""
+
+        if params is None:
+            return
+
+        mjt_obj = getattr(mujoco, "mjtObj")
+        vehicle_id = int(mujoco.mj_name2id(self.model, mjt_obj.mjOBJ_BODY, "vehicle"))
+        if vehicle_id >= 0:
+            self.model.body_mass[vehicle_id] = params.mass
+            inertia = np.array([
+                max(params.inertia, 1e-3),
+                max(params.inertia, 1e-3),
+                max(params.inertia * 0.5, 1e-3),
+            ])
+            self.model.body_inertia[vehicle_id] = inertia
+
+        gravity = np.array([0.0, 0.0, -params.gravity], dtype=np.float64)
+        self.model.opt.gravity[:] = gravity
+
+        joint_limit = min(self.ctrl_limit, max(params.arm * 0.25, 0.05))
+        for joint_name in ("tvc_x", "tvc_y"):
+            joint_id = int(mujoco.mj_name2id(self.model, mjt_obj.mjOBJ_JOINT, joint_name))
+            if joint_id >= 0:
+                self.model.jnt_range[joint_id] = np.array([-joint_limit, joint_limit])
+        self.ctrl_limit = float(joint_limit)
         mujoco.mj_forward(self.model, self.data)
 
     def reset(self, disturbance_scale: float = 1.0) -> np.ndarray:
