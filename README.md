@@ -73,6 +73,13 @@ set JAX_PLATFORMS=gpu  # Windows PowerShell
 
 On Unix shells use `export` instead of `set`.
 
+When installing the package with GPU support on Linux, use the optional extra to
+pull in matching CUDA plugins automatically:
+
+```bash
+pip install -e .[gpu]
+```
+
 ## Running Tests
 
 Run the test suite using `pytest`:
