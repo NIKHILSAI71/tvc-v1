@@ -12,7 +12,7 @@ if TYPE_CHECKING:  # pragma: no cover - import-time side effects only
     from .env import Tvc2DEnv, make_mjx_batch
     from .mpc import compute_tvc_mpc_action
     from .policies import build_policy_network, evaluate_policy
-    from .training import train_controller
+    from .training import save_policy_checkpoints, train_controller
 else:
     _env = import_module(".env", __name__)
     Tvc2DEnv = _env.Tvc2DEnv
@@ -27,6 +27,7 @@ else:
 
     _training = import_module(".training", __name__)
     train_controller = _training.train_controller
+    save_policy_checkpoints = _training.save_policy_checkpoints
 
     _curriculum = import_module(".curriculum", __name__)
     build_curriculum = _curriculum.build_curriculum
@@ -38,5 +39,6 @@ __all__ = [
     "build_policy_network",
     "evaluate_policy",
     "train_controller",
+    "save_policy_checkpoints",
     "build_curriculum",
 ]
