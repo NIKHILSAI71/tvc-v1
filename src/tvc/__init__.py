@@ -1,5 +1,9 @@
 """Top-level package for advanced 2D TVC control research tooling."""
 
+from .runtime import ensure_jax_runtime
+
+ensure_jax_runtime()
+
 from .env import Tvc2DEnv, make_mjx_batch
 from .mpc import compute_tvc_mpc_action
 from .policies import build_policy_network, evaluate_policy
