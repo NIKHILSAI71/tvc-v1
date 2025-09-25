@@ -16,7 +16,7 @@ import logging
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -24,7 +24,7 @@ import jax.tree_util as jtu
 import numpy as np
 import optax
 
-from .curriculum import CurriculumStage, build_curriculum, select_stage
+from .curriculum import CurriculumStage, build_curriculum
 from .dynamics import RocketParams
 from .env import StepResult, Tvc2DEnv
 from .mpc import MpcConfig, compute_tvc_mpc_action
@@ -63,6 +63,23 @@ class PpoEvolutionConfig:
     plateau_factor: float = 0.6
     plateau_threshold: float = 1.0
     weight_decay: float = 1e-4
+    adaptive_lr_enabled: bool = True
+    adaptive_lr_target_kl: float = 0.015
+    adaptive_lr_lower_ratio: float = 0.45
+    adaptive_lr_upper_ratio: float = 1.8
+    adaptive_lr_increase_factor: float = 1.2
+    adaptive_lr_decrease_factor: float = 0.7
+    adaptive_lr_min_scale: float = 0.05
+    adaptive_lr_max_scale: float = 6.0
+    stage_lr_bias: Dict[str, float] = field(
+        default_factory=lambda: {
+            "pad_hover": 1.0,
+            "lateral_reject": 0.85,
+            "wind_gust": 0.7,
+        }
+    )
+    curriculum_adaptation: bool = True
+    curriculum_reward_smoothing: float = 0.25
 
 
 @dataclass
@@ -79,6 +96,12 @@ class TrainingState:
     best_return: float = -float("inf")
     plateau_counter: int = 0
     last_aux: Dict[str, float] = field(default_factory=dict)
+    stage_index: int = 0
+    stage_episode: int = 0
+    stage_success_counter: int = 0
+    stage_reward_ema: float = 0.0
+    current_stage_name: Optional[str] = None
+    last_mpc_plan: Optional[jnp.ndarray] = None
 
 
 @dataclass
@@ -204,8 +227,19 @@ def train_controller(
         rng=rng,
         obs_rms=RunningNormalizer(),
         lr_schedule=lr_schedule,
+        current_stage_name=curriculum[0].name if curriculum else None,
     )
+    if config.adaptive_lr_enabled and curriculum:
+        initial_bias = config.stage_lr_bias.get(curriculum[0].name)
+        if initial_bias is not None:
+            state.lr_scale = float(np.clip(initial_bias, config.adaptive_lr_min_scale, config.adaptive_lr_max_scale))
     logger = logging.getLogger("tvc.training")
+
+    try:
+        if hasattr(env, "apply_rocket_params"):
+            env.apply_rocket_params(config.params)
+    except Exception as exc:  # pragma: no cover - defensive path
+        logger.warning("Unable to apply rocket parameters to environment: %s", exc)
 
     logger.info("Beginning training run for %s episodes", total_episodes)
 
@@ -215,20 +249,25 @@ def train_controller(
         artifacts_dir.mkdir(parents=True, exist_ok=True)
 
     for episode in range(total_episodes):
-        stage = select_stage(curriculum, episode)
+        stage_idx = min(state.stage_index, len(curriculum) - 1)
+        stage = curriculum[stage_idx]
+        stage_name = stage.name
+        stage_disturbance = float(stage.disturbance_scale)
         trajectories, rollout_stats = _collect_rollout(env, stage, state, policy_funcs, config)
         state = _ppo_update(state, trajectories, optimiser, policy_funcs, config)
+        _maybe_update_adaptive_lr(state, config)
         episode_return = float(jnp.sum(trajectories["rewards"]))
         reward_mean = float(jnp.mean(trajectories["rewards"]))
         state, elite_best, elite_mean = _evolutionary_update(env, stage, state, policy_funcs, config)
 
         base_lr = state.lr_schedule(state.update_step) if state.lr_schedule is not None else config.learning_rate
         effective_lr = float(base_lr) * state.lr_scale
+        stage, stage_metrics = _update_stage_progress(state, curriculum, stage, episode_return, logger, config)
 
         episode_metrics: Dict[str, Any] = {
             "episode": float(episode + 1),
-            "stage": stage.name,
-            "disturbance_scale": float(stage.disturbance_scale),
+            "stage": stage_name,
+            "disturbance_scale": stage_disturbance,
             "rollout_return": episode_return,
             "reward_mean": reward_mean,
             "elite_best": elite_best,
@@ -241,6 +280,7 @@ def train_controller(
         episode_metrics.update(rollout_stats)
         if state.last_aux:
             episode_metrics.update(state.last_aux)
+        episode_metrics.update(stage_metrics)
 
         if config.use_plateau_schedule:
             if episode_return > state.best_return + config.plateau_threshold:
@@ -261,6 +301,8 @@ def train_controller(
                             float(base_lr) * state.lr_scale,
                         )
                     state.plateau_counter = 0
+        if config.adaptive_lr_enabled:
+            state.lr_scale = float(np.clip(state.lr_scale, config.adaptive_lr_min_scale, config.adaptive_lr_max_scale))
         episode_metrics["plateau_counter"] = float(state.plateau_counter)
         episode_metrics["best_return"] = state.best_return
         state.history.append(episode_metrics)
@@ -269,8 +311,8 @@ def train_controller(
             "Episode %s/%s | stage=%s (disturbance=%.2f) | rollout_return=%.3f | reward_mean=%.3f | elite_best=%.3f | elite_mean=%.3f | elites=%s",
             episode + 1,
             total_episodes,
-            stage.name,
-            stage.disturbance_scale,
+            stage_name,
+            stage_disturbance,
             episode_return,
             reward_mean,
             elite_best,
@@ -306,10 +348,17 @@ def _collect_rollout(
     norm_observation = _normalize_observation(obs_rms, observation)
     mpc_interval = max(1, int(config.mpc_interval))
     cached_mpc_action = jnp.zeros(2, dtype=jnp.float32)
+    cached_plan = state.last_mpc_plan
+    if cached_plan is not None:
+        cached_plan = jnp.asarray(cached_plan, dtype=jnp.float32)
     info_sums: Dict[str, float] | None = None
     info_abs_sums: Dict[str, float] | None = None
     info_max: Dict[str, float] | None = None
     info_min: Dict[str, float] | None = None
+    mpc_loss_values: List[float] = []
+    mpc_grad_norms: List[float] = []
+    mpc_iterations: List[float] = []
+    mpc_saturation: List[float] = []
 
     for step in range(config.rollout_length):
         state.rng, policy_key, dropout_key = jax.random.split(state.rng, 3)
@@ -325,12 +374,17 @@ def _collect_rollout(
         policy_action = mean + std * epsilon
         if step % mpc_interval == 0:
             rocket_state = _gather_state(env)
-            cached_mpc_action, _ = compute_tvc_mpc_action(
+            cached_mpc_action, mpc_diag, cached_plan = compute_tvc_mpc_action(
                 rocket_state,
                 stage.target_state,
                 config.params,
                 config.mpc_config,
+                warm_start=cached_plan,
             )
+            mpc_loss_values.append(float(mpc_diag.get("mpc_loss", 0.0)))
+            mpc_grad_norms.append(float(mpc_diag.get("mpc_grad_norm", 0.0)))
+            mpc_iterations.append(float(mpc_diag.get("mpc_iterations", config.mpc_config.iterations)))
+            mpc_saturation.append(float(mpc_diag.get("mpc_saturation", 0.0)))
         combined_action = jnp.clip(
             policy_action + cached_mpc_action,
             -config.mpc_config.control_limit,
@@ -413,7 +467,90 @@ def _collect_rollout(
         value_array = jnp.array(value_buffer[:-1])
         info_metrics["value_mean"] = float(jnp.mean(value_array))
         info_metrics["value_std"] = float(jnp.std(value_array))
+    if mpc_loss_values:
+        info_metrics["mpc_loss_mean"] = float(np.mean(mpc_loss_values))
+        info_metrics["mpc_loss_last"] = float(mpc_loss_values[-1])
+        info_metrics["mpc_grad_norm_mean"] = float(np.mean(mpc_grad_norms))
+        info_metrics["mpc_iterations_mean"] = float(np.mean(mpc_iterations))
+        info_metrics["mpc_saturation_mean"] = float(np.mean(mpc_saturation))
+    state.last_mpc_plan = cached_plan
     return batch, info_metrics
+
+
+def _maybe_update_adaptive_lr(state: TrainingState, config: PpoEvolutionConfig) -> None:
+    if not config.adaptive_lr_enabled:
+        return
+    approx_kl = state.last_aux.get("approx_kl")
+    if approx_kl is None or math.isnan(approx_kl):
+        return
+    target = max(config.adaptive_lr_target_kl, 1e-5)
+    lower = target * config.adaptive_lr_lower_ratio
+    upper = target * config.adaptive_lr_upper_ratio
+    scale = state.lr_scale
+    if approx_kl > upper:
+        scale *= config.adaptive_lr_decrease_factor
+    elif approx_kl < lower:
+        scale *= config.adaptive_lr_increase_factor
+    state.lr_scale = float(np.clip(scale, config.adaptive_lr_min_scale, config.adaptive_lr_max_scale))
+
+
+def _update_stage_progress(
+    state: TrainingState,
+    curriculum: List[CurriculumStage],
+    stage: CurriculumStage,
+    episode_return: float,
+    logger: logging.Logger,
+    config: PpoEvolutionConfig,
+) -> Tuple[CurriculumStage, Dict[str, float]]:
+    state.stage_episode += 1
+    alpha = float(np.clip(config.curriculum_reward_smoothing, 0.0, 1.0))
+    if state.stage_episode == 1:
+        state.stage_reward_ema = episode_return
+    else:
+        state.stage_reward_ema = (1.0 - alpha) * state.stage_reward_ema + alpha * episode_return
+
+    if config.curriculum_adaptation and stage.reward_threshold is not None:
+        if state.stage_reward_ema >= stage.reward_threshold:
+            state.stage_success_counter += 1
+        else:
+            state.stage_success_counter = max(state.stage_success_counter - 1, 0)
+    else:
+        state.stage_success_counter = 0
+
+    metrics = {
+        "stage_episode": float(state.stage_episode),
+        "stage_reward_ema": float(state.stage_reward_ema),
+        "stage_success_counter": float(state.stage_success_counter),
+    }
+
+    should_advance = False
+    min_required = max(stage.min_episodes, 1)
+    if config.curriculum_adaptation and stage.reward_threshold is not None:
+        if state.stage_episode >= min_required and state.stage_success_counter >= stage.success_episodes:
+            should_advance = True
+    if state.stage_episode >= stage.episodes:
+        should_advance = True
+
+    if should_advance and state.stage_index < len(curriculum) - 1:
+        previous_stage = stage.name
+        state.stage_index += 1
+        state.stage_episode = 0
+        state.stage_success_counter = 0
+        state.stage_reward_ema = 0.0
+        state.last_mpc_plan = None
+        stage = curriculum[state.stage_index]
+        state.current_stage_name = stage.name
+        metrics["stage_transition"] = 1.0
+        logger.info("Advancing curriculum from %s to %s", previous_stage, stage.name)
+        if config.adaptive_lr_enabled:
+            bias = config.stage_lr_bias.get(stage.name)
+            if bias is not None:
+                state.lr_scale = float(np.clip(bias, config.adaptive_lr_min_scale, config.adaptive_lr_max_scale))
+    else:
+        metrics["stage_transition"] = 0.0
+        state.current_stage_name = stage.name
+
+    return stage, metrics
 
 
 def _ppo_update(
@@ -686,6 +823,17 @@ def _config_to_serialisable(config: PpoEvolutionConfig) -> Dict[str, Any]:
         "use_lr_schedule": config.use_lr_schedule,
         "lr_warmup_fraction": config.lr_warmup_fraction,
         "min_learning_rate": config.min_learning_rate,
+        "adaptive_lr_enabled": config.adaptive_lr_enabled,
+        "adaptive_lr_target_kl": config.adaptive_lr_target_kl,
+        "adaptive_lr_lower_ratio": config.adaptive_lr_lower_ratio,
+        "adaptive_lr_upper_ratio": config.adaptive_lr_upper_ratio,
+        "adaptive_lr_increase_factor": config.adaptive_lr_increase_factor,
+        "adaptive_lr_decrease_factor": config.adaptive_lr_decrease_factor,
+        "adaptive_lr_min_scale": config.adaptive_lr_min_scale,
+        "adaptive_lr_max_scale": config.adaptive_lr_max_scale,
+        "stage_lr_bias": dict(config.stage_lr_bias),
+        "curriculum_adaptation": config.curriculum_adaptation,
+        "curriculum_reward_smoothing": config.curriculum_reward_smoothing,
         "policy_config": {
             "hidden_dims": list(config.policy_config.hidden_dims),
             "activation": activation_name,
