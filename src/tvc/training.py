@@ -23,6 +23,7 @@ import jax.numpy as jnp
 import jax.tree_util as jtu
 import numpy as np
 import optax
+from flax import serialization
 
 from .curriculum import CurriculumStage, build_curriculum
 from .dynamics import RocketParams
@@ -366,6 +367,11 @@ def train_controller(
     logger.info("Training loop complete. Elites maintained: %s", len(state.elites))
     if artifacts_dir is not None:
         save_training_artifacts(state.history, artifacts_dir, config)
+        checkpoint_paths = save_policy_checkpoints(state, artifacts_dir)
+        logger.info(
+            "Saved policy checkpoints: %s",
+            ", ".join(path.name for path in checkpoint_paths.values()),
+        )
     return state
 
 
@@ -845,6 +851,59 @@ def save_training_artifacts(
     plot_path = output_dir / "metrics.png"
     fig.savefig(str(plot_path), dpi=200)
     plt.close(fig)
+
+
+def _ensure_json_serialisable(value: Any) -> Any:
+    if isinstance(value, (np.floating, np.integer)):
+        return float(value)
+    if isinstance(value, (np.ndarray, jnp.ndarray)):
+        return np.asarray(value).tolist()
+    if isinstance(value, dict):
+        return {k: _ensure_json_serialisable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_ensure_json_serialisable(v) for v in value]
+    return value
+
+
+def save_policy_checkpoints(state: TrainingState, output_dir: Path) -> Dict[str, Path]:
+    """Persists the trained policy parameters, elites, and normaliser statistics."""
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    artifacts: Dict[str, Path] = {}
+
+    final_params = jax.device_get(state.params)
+    final_path = output_dir / "policy_final.msgpack"
+    final_path.write_bytes(serialization.to_bytes(final_params))
+    artifacts["policy_final"] = final_path
+
+    if state.elites:
+        best_elite = jax.device_get(state.elites[0])
+        elite_path = output_dir / "policy_elite_best.msgpack"
+        elite_path.write_bytes(serialization.to_bytes(best_elite))
+        artifacts["policy_elite_best"] = elite_path
+
+    mean = np.asarray(jax.device_get(state.obs_rms.mean), dtype=np.float32)
+    m2 = np.asarray(jax.device_get(state.obs_rms.m2), dtype=np.float32)
+    count = np.asarray([state.obs_rms.count], dtype=np.float32)
+    normaliser_path = output_dir / "observation_normalizer.npz"
+    np.savez(normaliser_path, count=count, mean=mean, m2=m2)
+    artifacts["observation_normalizer"] = normaliser_path
+
+    best_episode = max(state.history, key=lambda item: item.get("rollout_return", -float("inf")), default=None)
+    metadata: Dict[str, Any] = {
+        "episodes": len(state.history),
+        "best_return": float(state.best_return),
+        "current_stage": state.current_stage_name,
+        "lr_scale": state.lr_scale,
+    }
+    if best_episode is not None:
+        metadata["best_episode"] = best_episode
+
+    metadata_path = output_dir / "policy_metadata.json"
+    metadata_path.write_text(json.dumps(_ensure_json_serialisable(metadata), indent=2), encoding="utf-8")
+    artifacts["policy_metadata"] = metadata_path
+
+    return artifacts
 
 
 def _config_to_serialisable(config: PpoEvolutionConfig) -> Dict[str, Any]:
