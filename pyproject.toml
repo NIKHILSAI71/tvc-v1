@@ -21,6 +21,8 @@ dependencies = [
   "numpy>=2.0.0",
   "absl-py>=2.1.0",
   "tqdm>=4.66.5"
+  "warp-lang>=1.9.0"
+  "mujoco-mjx>=3.3.6"
 ]
 
 [tool.setuptools.packages.find]
