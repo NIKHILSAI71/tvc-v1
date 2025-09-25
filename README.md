@@ -45,16 +45,52 @@ corrections in tandem with evolutionary elitism.
 - `src/tvc/training.py` – PPO + evolution training loop integrating MPC.
 - `assets/tvc_2d.xml` – MJCF model describing the planar rocket and TVC gear.
 
-## Usage
+## Installation
 
-```python
-import jax
-from tvc import Tvc2DEnv, train_controller
+1. Install system dependencies (MuJoCo and Python 3.10+).
+2. Install project requirements in a virtual environment:
+   ```bash
+   pip install -e .
+   ```
+3. Download MuJoCo assets if needed (see `assets/` folder for details).
 
-key = jax.random.key(0)
-env = Tvc2DEnv()
-result = train_controller(env, total_episodes=200, rng=key)
+### GPU runtimes (JAX)
+
+If you plan to use NVIDIA GPUs, ensure the JAX CUDA plugin stack matches the
+installed `jaxlib` version. When CUDA packages are out of sync, the CLI will
+temporarily force CPU execution and print upgrade instructions similar to:
+
+```bash
+pip install --upgrade "jax==0.7.2" "jaxlib==0.7.2" \
+    "jax-cuda12-plugin[with-cuda]==0.7.2" "jax-cuda12-pjrt==0.7.2"
 ```
 
-The returned `result` contains the optimised parameters, optimiser state, elite
-population, and RNG handle for continued training.
+After upgrading you can opt back into GPU execution (if desired) by setting:
+
+```bash
+set JAX_PLATFORMS=gpu  # Windows PowerShell
+```
+
+On Unix shells use `export` instead of `set`.
+
+## Running Tests
+
+Run the test suite using `pytest`:
+
+```bash
+pytest
+```
+
+## Usage
+
+To train the controller:
+
+```bash
+python -m tvc train --episodes 100 --seed 42
+```
+
+To run the smoke tests:
+
+```bash
+python -m tvc test
+```
