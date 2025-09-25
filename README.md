@@ -96,12 +96,16 @@ To train the controller:
 python -m tvc train --episodes 100 --seed 42
 ```
 
-Each training invocation now creates a timestamped run directory under `trainning/` by default, e.g. `trainning/run-2025-09-24-04-30PM/`. The folder contains:
+Each training invocation now creates a timestamped run directory under `training/` by default, e.g. `training/run-2025-09-24-04-30PM/`. The folder contains:
 
 - `training.log` – the full textual log for the run.
 - `metrics.csv` / `metrics.json` – per-episode statistics (returns, elite scores, environment diagnostics).
 - `metrics.png` – an aggregated visualization of rewards, stabilisation metrics, and the learning-rate schedule.
 - `config.json` – the serialisable subset of the training configuration used for the run.
+- `policy_final.msgpack` – the trained PPO parameters corresponding to the final episode.
+- `policy_elite_best.msgpack` – the highest-scoring elite retained by the evolutionary phase (when available).
+- `observation_normalizer.npz` – running mean/variance statistics for normalising observations at inference time.
+- `policy_metadata.json` – handy metadata describing the best recorded episode and learning-rate state.
 
 Pass `--output-root` to change the base directory or `--run-tag` to supply a custom run name. The new warmup cosine learning-rate schedule can be disabled with `--no-lr-schedule` if desired.
 
