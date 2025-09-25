@@ -23,6 +23,8 @@ import argparse
 import sys
 from typing import Sequence
 
+from .runtime import ensure_jax_runtime
+
 
 def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="python -m tvc", description="TVC research CLI")
@@ -46,6 +48,8 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
 
 
 def _run_train(episodes: int, seed: int, max_steps: int) -> None:
+    ensure_jax_runtime()
+
     import jax
 
     from .env import Tvc2DEnv
