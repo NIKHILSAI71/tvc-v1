@@ -9,12 +9,15 @@ import jax.numpy as jnp
 
 @dataclass(frozen=True)
 class CurriculumStage:
-    """Encapsulates stochastic disturbances and desired terminal states."""
+    """Encapsulates stochastic disturbances, targets, and advancement rules."""
 
     name: str
     disturbance_scale: float
     target_state: jnp.ndarray
     episodes: int
+    reward_threshold: float | None = None
+    success_episodes: int = 3
+    min_episodes: int = 0
 
 
 def build_curriculum() -> List[CurriculumStage]:
@@ -25,9 +28,33 @@ def build_curriculum() -> List[CurriculumStage]:
     gust_target = hover_target.at[3].set(-1.0)
 
     return [
-        CurriculumStage("pad_hover", 0.1, hover_target, 500),
-        CurriculumStage("lateral_reject", 0.3, translational_target, 1200),
-        CurriculumStage("wind_gust", 0.6, gust_target, 1800),
+        CurriculumStage(
+            "pad_hover",
+            0.1,
+            hover_target,
+            episodes=500,
+            reward_threshold=-160.0,
+            success_episodes=2,
+            min_episodes=120,
+        ),
+        CurriculumStage(
+            "lateral_reject",
+            0.3,
+            translational_target,
+            episodes=1200,
+            reward_threshold=-140.0,
+            success_episodes=3,
+            min_episodes=200,
+        ),
+        CurriculumStage(
+            "wind_gust",
+            0.6,
+            gust_target,
+            episodes=1800,
+            reward_threshold=-125.0,
+            success_episodes=4,
+            min_episodes=320,
+        ),
     ]
 
 
