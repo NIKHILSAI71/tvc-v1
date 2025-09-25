@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tvc-controller"
+version = "0.1.0"
+description = "Advanced 2D TVC controller with MPC, PPO, and evolutionary curriculum over MuJoCo MJX"
+authors = [
+  { name = "Research Lab" }
+]
+requires-python = ">=3.10"
+dependencies = [
+  "mujoco>=3.1.4",
+  "jax>=0.4.28",
+  "jaxlib>=0.4.28",
+  "flax>=0.8.5",
+  "optax>=0.2.2",
+  "rlax>=0.1.8",
+  "chex>=0.1.87",
+  "numpy>=2.0.0",
+  "absl-py>=2.1.0",
+  "tqdm>=4.66.5"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra -q"
+testpaths = ["tests"]
