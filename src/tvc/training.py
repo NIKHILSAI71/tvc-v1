@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict, List, Tuple
 
 import jax
 import jax.numpy as jnp
+import jax.tree_util as jtu
 import numpy as np
 import optax
 
@@ -38,8 +39,8 @@ class PpoEvolutionConfig:
     lam: float = 0.95
     learning_rate: float = 8e-4
     clip_epsilon: float = 0.2
-    rollout_length: int = 256
-    num_epochs: int = 5
+    rollout_length: int = 384
+    num_epochs: int = 6
     minibatch_size: int = 128
     mutation_scale: float = 0.02
     population_size: int = 8
@@ -48,13 +49,20 @@ class PpoEvolutionConfig:
     mpc_config: MpcConfig = MpcConfig(horizon=12, iterations=12, learning_rate=0.06)
     params: RocketParams = RocketParams()
     mpc_interval: int = 3
-    evaluation_episodes: int = 1
+    evaluation_episodes: int = 3
     evaluation_max_steps: int = 250
     value_clip_epsilon: float = 0.2
     grad_clip_norm: float = 1.0
     use_lr_schedule: bool = True
     lr_warmup_fraction: float = 0.1
     min_learning_rate: float = 1e-5
+    entropy_coef: float = 3e-3
+    value_coef: float = 0.5
+    use_plateau_schedule: bool = True
+    plateau_patience: int = 4
+    plateau_factor: float = 0.6
+    plateau_threshold: float = 1.0
+    weight_decay: float = 1e-4
 
 
 @dataclass
@@ -67,6 +75,10 @@ class TrainingState:
     history: List[Dict[str, Any]] = field(default_factory=list)
     update_step: int = 0
     lr_schedule: Callable[[int], float] | None = None
+    lr_scale: float = 1.0
+    best_return: float = -float("inf")
+    plateau_counter: int = 0
+    last_aux: Dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -94,12 +106,16 @@ def _build_optimizer(
             end_value=config.min_learning_rate,
         )
         learning_rate = base_schedule
-        schedule = lambda step, _schedule=base_schedule: float(_schedule(step))
+
+        def schedule_fn(step: int, _schedule=base_schedule) -> float:
+            return float(_schedule(step))
+
+        schedule = schedule_fn
 
     transforms = []
     if config.grad_clip_norm and config.grad_clip_norm > 0.0:
         transforms.append(optax.clip_by_global_norm(config.grad_clip_norm))
-    transforms.append(optax.adam(learning_rate))
+    transforms.append(optax.adamw(learning_rate=learning_rate, weight_decay=config.weight_decay))
     optimiser = optax.chain(*transforms)
     return optimiser, schedule
 
@@ -206,9 +222,8 @@ def train_controller(
         reward_mean = float(jnp.mean(trajectories["rewards"]))
         state, elite_best, elite_mean = _evolutionary_update(env, stage, state, policy_funcs, config)
 
-        current_lr: float | None = None
-        if state.lr_schedule is not None:
-            current_lr = float(state.lr_schedule(state.update_step))
+        base_lr = state.lr_schedule(state.update_step) if state.lr_schedule is not None else config.learning_rate
+        effective_lr = float(base_lr) * state.lr_scale
 
         episode_metrics: Dict[str, Any] = {
             "episode": float(episode + 1),
@@ -219,10 +234,35 @@ def train_controller(
             "elite_best": elite_best,
             "elite_mean": elite_mean,
             "elites": float(len(state.elites)),
+            "learning_rate_base": float(base_lr),
+            "learning_rate": effective_lr,
+            "lr_scale": state.lr_scale,
         }
-        if current_lr is not None:
-            episode_metrics["learning_rate"] = current_lr
         episode_metrics.update(rollout_stats)
+        if state.last_aux:
+            episode_metrics.update(state.last_aux)
+
+        if config.use_plateau_schedule:
+            if episode_return > state.best_return + config.plateau_threshold:
+                state.best_return = episode_return
+                state.plateau_counter = 0
+            else:
+                state.plateau_counter += 1
+                if state.plateau_counter >= config.plateau_patience:
+                    new_scale = max(
+                        state.lr_scale * config.plateau_factor,
+                        config.min_learning_rate / max(config.learning_rate, 1e-12),
+                    )
+                    if new_scale < state.lr_scale:
+                        state.lr_scale = new_scale
+                        logger.info(
+                            "Learning-rate plateau detected (episode %s). Scaling LR to %.6e",
+                            episode + 1,
+                            float(base_lr) * state.lr_scale,
+                        )
+                    state.plateau_counter = 0
+        episode_metrics["plateau_counter"] = float(state.plateau_counter)
+        episode_metrics["best_return"] = state.best_return
         state.history.append(episode_metrics)
 
         logger.info(
@@ -253,6 +293,8 @@ def _collect_rollout(
 ):
     obs_buffer: List[jnp.ndarray] = []
     action_buffer: List[jnp.ndarray] = []
+    applied_action_buffer: List[jnp.ndarray] = []
+    mpc_action_buffer: List[jnp.ndarray] = []
     logprob_buffer: List[float] = []
     reward_buffer: List[float] = []
     value_buffer: List[float] = []
@@ -270,8 +312,14 @@ def _collect_rollout(
     info_min: Dict[str, float] | None = None
 
     for step in range(config.rollout_length):
-        state.rng, policy_key = jax.random.split(state.rng)
-        mean, log_std, value = funcs.distribution(state.params, norm_observation)
+        state.rng, policy_key, dropout_key = jax.random.split(state.rng, 3)
+        use_dropout = config.policy_config.dropout_rate > 0.0
+        mean, log_std, value = funcs.distribution(
+            state.params,
+            norm_observation,
+            key=dropout_key if use_dropout else None,
+            deterministic=not use_dropout,
+        )
         std = jnp.exp(log_std)
         epsilon = jax.random.normal(policy_key, shape=mean.shape)
         policy_action = mean + std * epsilon
@@ -295,6 +343,8 @@ def _collect_rollout(
 
         obs_buffer.append(norm_observation)
         action_buffer.append(policy_action)
+        applied_action_buffer.append(combined_action)
+        mpc_action_buffer.append(cached_mpc_action)
         logprob_buffer.append(float(log_prob))
         reward_buffer.append(result.reward)
         value_buffer.append(float(value))
@@ -305,10 +355,8 @@ def _collect_rollout(
             info_abs_sums = {k: 0.0 for k in result.info}
             info_max = {k: -float("inf") for k in result.info}
             info_min = {k: float("inf") for k in result.info}
-        assert info_sums is not None
-        assert info_abs_sums is not None
-        assert info_max is not None
-        assert info_min is not None
+
+        assert info_sums is not None and info_abs_sums is not None and info_max is not None and info_min is not None
 
         for key, value_item in result.info.items():
             scalar = float(value_item)
@@ -345,6 +393,26 @@ def _collect_rollout(
             info_metrics[f"{key}_abs_mean"] = info_abs_sums[key] / num_steps
             info_metrics[f"{key}_max"] = info_max[key]
             info_metrics[f"{key}_min"] = info_min[key]
+    if applied_action_buffer:
+        applied_actions = jnp.stack(applied_action_buffer)
+        policy_actions = jnp.stack(action_buffer)
+        mpc_actions = jnp.stack(mpc_action_buffer)
+        action_norms = jnp.linalg.norm(applied_actions, axis=1)
+        policy_norms = jnp.linalg.norm(policy_actions, axis=1)
+        mpc_norms = jnp.linalg.norm(mpc_actions, axis=1)
+        info_metrics.update(
+            {
+                "action_norm_mean": float(jnp.mean(action_norms)),
+                "action_norm_std": float(jnp.std(action_norms)),
+                "policy_action_norm_mean": float(jnp.mean(policy_norms)),
+                "mpc_action_norm_mean": float(jnp.mean(mpc_norms)),
+                "episode_steps": float(applied_actions.shape[0]),
+            }
+        )
+    if len(value_buffer) > 1:
+        value_array = jnp.array(value_buffer[:-1])
+        info_metrics["value_mean"] = float(jnp.mean(value_array))
+        info_metrics["value_std"] = float(jnp.std(value_array))
     return batch, info_metrics
 
 
@@ -375,11 +443,13 @@ def _ppo_update(
     }
 
     def loss_fn(params, minibatch):
-        mean, log_std, values = funcs.distribution(params, minibatch["obs"])
+        mean, log_std, values = funcs.distribution(params, minibatch["obs"], key=None, deterministic=True)
         log_prob = jax.vmap(_gaussian_log_prob, in_axes=(0, None, 0))(mean, log_std, minibatch["actions"])
         ratio = jnp.exp(log_prob - minibatch["log_probs"])
         clipped = jnp.clip(ratio, 1.0 - config.clip_epsilon, 1.0 + config.clip_epsilon)
-        actor_loss = -jnp.mean(jnp.minimum(ratio * minibatch["advantages"], clipped * minibatch["advantages"]))
+        surrogate = ratio * minibatch["advantages"]
+        clipped_surrogate = clipped * minibatch["advantages"]
+        actor_loss = -jnp.mean(jnp.minimum(surrogate, clipped_surrogate))
         value_clipped = minibatch["value_preds"] + jnp.clip(
             values - minibatch["value_preds"],
             -config.value_clip_epsilon,
@@ -387,26 +457,55 @@ def _ppo_update(
         )
         value_loss_unclipped = (minibatch["returns"] - values) ** 2
         value_loss_clipped = (minibatch["returns"] - value_clipped) ** 2
-        value_loss = 0.5 * jnp.mean(jnp.maximum(value_loss_unclipped, value_loss_clipped))
-        entropy = 0.5 * jnp.sum(1.0 + 2.0 * log_std + jnp.log(2.0 * jnp.pi))
-        return actor_loss + value_loss - 0.001 * entropy
+        value_loss = jnp.mean(jnp.maximum(value_loss_unclipped, value_loss_clipped))
+        entropy = jnp.mean(
+            jnp.sum(log_std + 0.5 * jnp.log(2.0 * jnp.pi * jnp.e), axis=-1)
+        )
+        approx_kl = 0.5 * jnp.mean((log_prob - minibatch["log_probs"]) ** 2)
+        clip_fraction = jnp.mean((jnp.abs(ratio - 1.0) > config.clip_epsilon).astype(jnp.float32))
+        total_loss = actor_loss + config.value_coef * value_loss - config.entropy_coef * entropy
+        return total_loss, (entropy, approx_kl, actor_loss, value_loss, clip_fraction)
 
     params = state.params
     opt_state = state.opt_state
     num_samples = dataset["obs"].shape[0]
+
+    metrics_sums = {"loss": 0.0, "entropy": 0.0, "approx_kl": 0.0, "policy_loss": 0.0, "value_loss": 0.0, "clip_fraction": 0.0}
+    total_batches = 0
+    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
 
     for _ in range(config.num_epochs):
         permutation = np.random.permutation(num_samples)
         for start in range(0, num_samples, config.minibatch_size):
             idx = permutation[start : start + config.minibatch_size]
             minibatch = {k: v[idx] for k, v in dataset.items()}
-            grads = jax.grad(loss_fn)(params, minibatch)
+            (loss_value, aux_vals), grads = grad_fn(params, minibatch)
             updates, opt_state = optimiser.update(grads, opt_state, params)
-            params = optax.apply_updates(params, updates)
+            scaled_updates = jtu.tree_map(lambda u: state.lr_scale * u, updates)
+            params = optax.apply_updates(params, scaled_updates)
             state.update_step += 1
+            entropy_val, approx_kl_val, actor_loss_val, value_loss_val, clip_fraction_val = aux_vals
+            metrics_sums["loss"] += float(loss_value)
+            metrics_sums["entropy"] += float(entropy_val)
+            metrics_sums["approx_kl"] += float(approx_kl_val)
+            metrics_sums["policy_loss"] += float(actor_loss_val)
+            metrics_sums["value_loss"] += float(value_loss_val)
+            metrics_sums["clip_fraction"] += float(clip_fraction_val)
+            total_batches += 1
 
     state.params = params
     state.opt_state = opt_state
+    if total_batches > 0:
+        for key in metrics_sums:
+            metrics_sums[key] /= total_batches
+
+    state.last_aux = {
+        **metrics_sums,
+        "advantage_std": float(jnp.std(advantages)),
+        "advantage_mean": float(jnp.mean(advantages)),
+        "return_mean": float(jnp.mean(returns)),
+        "return_std": float(jnp.std(returns)),
+    }
     return state
 
 
