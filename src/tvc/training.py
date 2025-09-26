@@ -98,10 +98,10 @@ class PpoEvolutionConfig:
     progressive_action_blend: bool = True
     plateau_warmup_episodes: int = 40
     plateau_min_scale: float = 0.2
-    mpc_loss_backoff_threshold: float = 1800.0
-    mpc_loss_backoff_slope: float = 0.6
-    mpc_loss_ema_decay: float = 0.35
-    mpc_min_weight: float = 0.05
+    mpc_loss_backoff_threshold: float = 1600.0
+    mpc_loss_backoff_slope: float = 4.0
+    mpc_loss_ema_decay: float = 0.5
+    mpc_min_weight: float = 0.02
     adaptive_lr_cooldown_episodes: int = 3
 
 
@@ -258,7 +258,8 @@ def _apply_mpc_loss_backoff(
     mpc_share = mpc_weight / base_sum
 
     excess_ratio = max(0.0, (loss_ema - threshold) / threshold)
-    scale = 1.0 / (1.0 + max(config.mpc_loss_backoff_slope, 0.0) * excess_ratio)
+    slope = max(float(config.mpc_loss_backoff_slope), 0.0)
+    scale = math.exp(-slope * excess_ratio)
     scaled_mpc_share = mpc_share * scale
 
     min_share = float(np.clip(config.mpc_min_weight, 0.0, 0.95))
@@ -694,6 +695,8 @@ def _collect_rollout(
     info_metrics["action_blend_mpc_weight"] = float(mpc_weight)
     info_metrics["action_blend_policy_weight_raw"] = float(policy_weight_raw)
     info_metrics["action_blend_mpc_weight_raw"] = float(mpc_weight_raw)
+    if mpc_weight_raw > 1e-6:
+        info_metrics["action_blend_mpc_backoff_scale"] = float(mpc_weight / mpc_weight_raw)
     info_metrics["action_blend_progress"] = stage_progress
     info_metrics["reward_scale"] = reward_scale
     if raw_reward_buffer:
