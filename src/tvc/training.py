@@ -98,6 +98,11 @@ class PpoEvolutionConfig:
     progressive_action_blend: bool = True
     plateau_warmup_episodes: int = 40
     plateau_min_scale: float = 0.2
+    mpc_loss_backoff_threshold: float = 1800.0
+    mpc_loss_backoff_slope: float = 0.6
+    mpc_loss_ema_decay: float = 0.35
+    mpc_min_weight: float = 0.05
+    adaptive_lr_cooldown_episodes: int = 3
 
 
 @dataclass
@@ -122,6 +127,9 @@ class TrainingState:
     stage_reward_ema: float = 0.0
     current_stage_name: Optional[str] = None
     last_mpc_plan: Optional[jnp.ndarray] = None
+    mpc_loss_ema: float = float("nan")
+    lr_adjust_cooldown: int = 0
+    lr_adjust_last_direction: int = 0
 
 
 @dataclass
@@ -226,6 +234,41 @@ def _resolve_action_blend_weights(
     policy_weight = policy_weight_raw / weight_sum
     mpc_weight = mpc_weight_raw / weight_sum
     return policy_weight, mpc_weight, stage_progress
+
+
+def _apply_mpc_loss_backoff(
+    policy_weight: float,
+    mpc_weight: float,
+    state: TrainingState,
+    config: PpoEvolutionConfig,
+) -> Tuple[float, float]:
+    """Reduces the MPC contribution when optimisation loss remains high."""
+
+    if mpc_weight <= 0.0:
+        return policy_weight, mpc_weight
+    threshold = float(config.mpc_loss_backoff_threshold)
+    if not math.isfinite(threshold) or threshold <= 0.0:
+        return policy_weight, mpc_weight
+    loss_ema = getattr(state, "mpc_loss_ema", float("nan"))
+    if not math.isfinite(loss_ema) or loss_ema <= threshold:
+        return policy_weight, mpc_weight
+
+    base_sum = max(policy_weight + mpc_weight, 1e-6)
+    policy_share = policy_weight / base_sum
+    mpc_share = mpc_weight / base_sum
+
+    excess_ratio = max(0.0, (loss_ema - threshold) / threshold)
+    scale = 1.0 / (1.0 + max(config.mpc_loss_backoff_slope, 0.0) * excess_ratio)
+    scaled_mpc_share = mpc_share * scale
+
+    min_share = float(np.clip(config.mpc_min_weight, 0.0, 0.95))
+    scaled_mpc_share = float(np.clip(scaled_mpc_share, min_share, 0.95))
+    scaled_policy_share = float(max(1e-6, 1.0 - scaled_mpc_share))
+
+    total = scaled_policy_share + scaled_mpc_share
+    if total <= 1e-6:
+        return 0.5, 0.5
+    return scaled_policy_share / total, scaled_mpc_share / total
 
 
 def _gather_state(env: Tvc2DEnv) -> jnp.ndarray:
@@ -506,11 +549,12 @@ def _collect_rollout(
         cached_plan = jnp.asarray(cached_plan, dtype=jnp.float32)
     reward_scale = float(config.reward_scale)
     reward_scale = reward_scale if reward_scale > 0.0 else 1.0
-    policy_weight, mpc_weight, stage_progress = _resolve_action_blend_weights(
+    policy_weight_raw, mpc_weight_raw, stage_progress = _resolve_action_blend_weights(
         config,
         stage,
         state.stage_episode,
     )
+    policy_weight, mpc_weight = _apply_mpc_loss_backoff(policy_weight_raw, mpc_weight_raw, state, config)
     info_sums: Dict[str, float] | None = None
     info_abs_sums: Dict[str, float] | None = None
     info_max: Dict[str, float] | None = None
@@ -632,13 +676,24 @@ def _collect_rollout(
         info_metrics["value_mean"] = float(jnp.mean(value_array))
         info_metrics["value_std"] = float(jnp.std(value_array))
     if mpc_loss_values:
-        info_metrics["mpc_loss_mean"] = float(np.mean(mpc_loss_values))
+        loss_mean = float(np.mean(mpc_loss_values))
+        info_metrics["mpc_loss_mean"] = loss_mean
         info_metrics["mpc_loss_last"] = float(mpc_loss_values[-1])
         info_metrics["mpc_grad_norm_mean"] = float(np.mean(mpc_grad_norms))
         info_metrics["mpc_iterations_mean"] = float(np.mean(mpc_iterations))
         info_metrics["mpc_saturation_mean"] = float(np.mean(mpc_saturation))
+        decay = float(np.clip(config.mpc_loss_ema_decay, 0.0, 1.0))
+        if not math.isfinite(state.mpc_loss_ema):
+            state.mpc_loss_ema = loss_mean
+        else:
+            state.mpc_loss_ema = (1.0 - decay) * state.mpc_loss_ema + decay * loss_mean
+        info_metrics["mpc_loss_ema"] = float(state.mpc_loss_ema)
+    elif math.isfinite(state.mpc_loss_ema):
+        info_metrics["mpc_loss_ema"] = float(state.mpc_loss_ema)
     info_metrics["action_blend_policy_weight"] = float(policy_weight)
     info_metrics["action_blend_mpc_weight"] = float(mpc_weight)
+    info_metrics["action_blend_policy_weight_raw"] = float(policy_weight_raw)
+    info_metrics["action_blend_mpc_weight_raw"] = float(mpc_weight_raw)
     info_metrics["action_blend_progress"] = stage_progress
     info_metrics["reward_scale"] = reward_scale
     if raw_reward_buffer:
@@ -658,12 +713,43 @@ def _maybe_update_adaptive_lr(state: TrainingState, config: PpoEvolutionConfig) 
     target = max(config.adaptive_lr_target_kl, 1e-5)
     lower = target * config.adaptive_lr_lower_ratio
     upper = target * config.adaptive_lr_upper_ratio
-    scale = state.lr_scale
+    direction = 0
     if approx_kl > upper:
-        scale *= config.adaptive_lr_decrease_factor
+        direction = -1
     elif approx_kl < lower:
+        direction = 1
+    else:
+        state.lr_adjust_last_direction = 0
+        if state.lr_adjust_cooldown > 0:
+            state.lr_adjust_cooldown = max(state.lr_adjust_cooldown - 1, 0)
+        return
+
+    cooldown_limit = max(int(config.adaptive_lr_cooldown_episodes), 0)
+    if (
+        cooldown_limit > 0
+        and state.lr_adjust_cooldown > 0
+        and direction == state.lr_adjust_last_direction
+        and direction != 0
+    ):
+        state.lr_adjust_cooldown = max(state.lr_adjust_cooldown - 1, 0)
+        return
+
+    scale = state.lr_scale
+    if direction < 0:
+        scale *= config.adaptive_lr_decrease_factor
+    else:
         scale *= config.adaptive_lr_increase_factor
-    state.lr_scale = float(np.clip(scale, config.adaptive_lr_min_scale, config.adaptive_lr_max_scale))
+
+    clipped_scale = float(np.clip(scale, config.adaptive_lr_min_scale, config.adaptive_lr_max_scale))
+    if math.isclose(clipped_scale, state.lr_scale, rel_tol=1e-6, abs_tol=1e-9):
+        state.lr_adjust_last_direction = direction
+        if state.lr_adjust_cooldown > 0:
+            state.lr_adjust_cooldown = max(state.lr_adjust_cooldown - 1, 0)
+        return
+
+    state.lr_scale = clipped_scale
+    state.lr_adjust_last_direction = direction
+    state.lr_adjust_cooldown = cooldown_limit
 
 
 def _update_stage_progress(
