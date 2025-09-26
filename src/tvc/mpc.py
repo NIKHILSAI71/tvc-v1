@@ -15,18 +15,18 @@ from .dynamics import RocketParams, simulate_rollout
 class MpcConfig:
     """Configuration bundle for the MPC optimisation routine."""
 
-    horizon: int = 24
+    horizon: int = 36
     dt: float = 0.05
-    iterations: int = 40
-    learning_rate: float = 0.08
+    iterations: int = 60
+    learning_rate: float = 0.06
     control_limit: float = 0.28
-    position_weight: float = 40.0
-    attitude_weight: float = 120.0
-    velocity_weight: float = 6.0
-    control_weight: float = 0.5
-    terminal_weight: float = 2.5
-    tolerance: float = 1e-4
-    grad_clip: float | None = 2.5
+    position_weight: float = 25.0
+    attitude_weight: float = 60.0
+    velocity_weight: float = 8.0
+    control_weight: float = 1.0
+    terminal_weight: float = 4.0
+    tolerance: float = 1e-3
+    grad_clip: float | None = 1.5
 
 
 def _cost_function(
@@ -84,6 +84,7 @@ def compute_tvc_mpc_action(
         if warm_start.shape == (horizon, 2):
             controls = _project_controls(warm_start, config.control_limit)
     controls_flat = controls.reshape(-1)
+    controls_initial = controls_flat
 
     def loss_fn(control_flat: jnp.ndarray) -> jnp.ndarray:
         shaped_controls = control_flat.reshape((horizon, 2))
@@ -110,30 +111,51 @@ def compute_tvc_mpc_action(
 
     optimiser = optax.adam(config.learning_rate)
     opt_state = optimiser.init(controls_flat)
-    (control_flat, opt_state), opt_stats = jax.lax.scan(opt_step, (controls_flat, opt_state), None, length=config.iterations)
+    (control_flat, opt_state), opt_stats = jax.lax.scan(
+        opt_step,
+        (controls_flat, opt_state),
+        None,
+        length=config.iterations,
+    )
 
     losses = opt_stats[0]
     grad_norms = opt_stats[1]
     controls = control_flat.reshape((horizon, 2))
     action = controls[0]
-    final_loss = float(losses[-1]) if losses.size else initial_loss
-    loss_deltas = jnp.abs(losses[1:] - losses[:-1]) if losses.size > 1 else jnp.zeros((0,), dtype=losses.dtype)
-    indices = jnp.arange(1, config.iterations, dtype=jnp.int32)
-    default_iters = jnp.array(config.iterations, dtype=jnp.int32)
+    final_loss_value = loss_fn(control_flat)
+    final_loss = float(final_loss_value)
+    loss_history = losses
+    if loss_history.size == 0:
+        loss_history = jnp.array([initial_loss], dtype=final_loss_value.dtype)
+    loss_history = jnp.concatenate([loss_history, final_loss_value[None]])
+    best_loss = float(jnp.min(loss_history))
+    loss_deltas = jnp.abs(loss_history[1:] - loss_history[:-1])
+    indices = jnp.arange(1, loss_history.shape[0], dtype=jnp.int32)
+    default_iters = jnp.array(loss_history.shape[0], dtype=jnp.int32)
     if config.tolerance > 0 and loss_deltas.size > 0:
         converged = jnp.where(loss_deltas < config.tolerance, indices, default_iters)
         effective_iters = int(jnp.min(converged).item())
-        if effective_iters == config.iterations:
-            effective_iters = config.iterations
+        effective_iters = max(1, min(effective_iters, loss_history.shape[0] - 1))
     else:
         effective_iters = config.iterations
     saturation_ratio = float(jnp.mean((jnp.abs(controls) >= (config.control_limit - 1e-4)).astype(jnp.float32)))
     grad_norm_final = float(grad_norms[-1]) if grad_norms.size else 0.0
+    fallback_applied = 0.0
+    if final_loss > initial_loss:
+        if warm_start is not None and warm_start.shape == (horizon, 2):
+            controls = _project_controls(warm_start, config.control_limit)
+        else:
+            controls = controls_initial.reshape((horizon, 2))
+        action = controls[0]
+        final_loss = min(final_loss, initial_loss)
+        fallback_applied = 1.0
     diagnostics = {
         "mpc_loss": final_loss,
         "mpc_initial_loss": initial_loss,
+        "mpc_best_loss": best_loss,
         "mpc_grad_norm": grad_norm_final,
         "mpc_iterations": float(effective_iters),
         "mpc_saturation": saturation_ratio,
+        "mpc_fallback_applied": fallback_applied,
     }
     return action, diagnostics, controls
