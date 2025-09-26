@@ -38,11 +38,11 @@ class PpoEvolutionConfig:
 
     gamma: float = 0.99
     lam: float = 0.95
-    learning_rate: float = 8e-4
-    clip_epsilon: float = 0.2
-    rollout_length: int = 384
-    num_epochs: int = 6
-    minibatch_size: int = 128
+    learning_rate: float = 3e-4
+    clip_epsilon: float = 0.15
+    rollout_length: int = 512
+    num_epochs: int = 8
+    minibatch_size: int = 64
     mutation_scale: float = 0.02
     population_size: int = 8
     elite_keep: int = 2
@@ -56,12 +56,12 @@ class PpoEvolutionConfig:
     policy_eval_episodes: Optional[int] = None
     policy_eval_max_steps: Optional[int] = None
     value_clip_epsilon: float = 0.2
-    grad_clip_norm: float = 1.0
+    grad_clip_norm: float = 0.5
     use_lr_schedule: bool = True
-    lr_warmup_fraction: float = 0.1
-    min_learning_rate: float = 1e-5
-    entropy_coef: float = 3e-3
-    value_coef: float = 0.5
+    lr_warmup_fraction: float = 0.2
+    min_learning_rate: float = 5e-6
+    entropy_coef: float = 5e-3
+    value_coef: float = 1.0
     use_plateau_schedule: bool = True
     plateau_patience: int = 4
     plateau_factor: float = 0.6
@@ -85,9 +85,13 @@ class PpoEvolutionConfig:
     )
     curriculum_adaptation: bool = True
     curriculum_reward_smoothing: float = 0.25
-    reward_scale: float = 0.25
-    policy_action_weight: float = 0.6
-    mpc_action_weight: float = 0.4
+    reward_scale: float = 1.0
+    policy_action_weight: float = 0.75
+    mpc_action_weight: float = 0.25
+    policy_action_weight_warmup: float = 0.3
+    mpc_action_weight_warmup: float = 0.7
+    action_blend_transition_episodes: int = 300
+    progressive_action_blend: bool = True
     plateau_warmup_episodes: int = 40
     plateau_min_scale: float = 0.2
 
@@ -180,6 +184,43 @@ def _normalize_observation(rms: RunningNormalizer, observation: jnp.ndarray) -> 
     variance = rms.m2 / rms.count
     variance = jnp.maximum(variance, 1e-6)
     return (obs - rms.mean) / jnp.sqrt(variance)
+
+
+def _resolve_action_blend_weights(
+    config: PpoEvolutionConfig,
+    stage: CurriculumStage,
+    stage_episode: int,
+    *,
+    progress_override: float | None = None,
+) -> Tuple[float, float, float]:
+    """Returns policy/MPC blending weights with optional scheduling."""
+
+    if progress_override is not None:
+        stage_progress = float(np.clip(progress_override, 0.0, 1.0))
+    elif config.progressive_action_blend:
+        transition_target = max(int(config.action_blend_transition_episodes), int(stage.min_episodes), 1)
+        stage_progress = float(np.clip(stage_episode / transition_target, 0.0, 1.0))
+    else:
+        stage_progress = 1.0
+
+    policy_target = max(float(config.policy_action_weight), 0.0)
+    mpc_target = max(float(config.mpc_action_weight), 0.0)
+    if config.progressive_action_blend:
+        policy_start = max(float(config.policy_action_weight_warmup), 0.0)
+        mpc_start = max(float(config.mpc_action_weight_warmup), 0.0)
+        policy_weight_raw = (1.0 - stage_progress) * policy_start + stage_progress * policy_target
+        mpc_weight_raw = (1.0 - stage_progress) * mpc_start + stage_progress * mpc_target
+    else:
+        policy_weight_raw = policy_target
+        mpc_weight_raw = mpc_target
+
+    weight_sum = policy_weight_raw + mpc_weight_raw
+    if weight_sum <= 1e-6:
+        return 0.5, 0.5, stage_progress
+
+    policy_weight = policy_weight_raw / weight_sum
+    mpc_weight = mpc_weight_raw / weight_sum
+    return policy_weight, mpc_weight, stage_progress
 
 
 def _gather_state(env: Tvc2DEnv) -> jnp.ndarray:
@@ -386,16 +427,28 @@ def train_controller(
         episode_metrics["episodes_since_improvement"] = float(episodes_since_improvement_metric)
         state.history.append(episode_metrics)
 
+        log_stage_progress = float(episode_metrics.get("action_blend_progress", float("nan")))
+        raw_reward_mean = float(episode_metrics.get("reward_raw_mean", float("nan")))
+        entropy_metric = float(episode_metrics.get("entropy", float("nan")))
+        mpc_loss_metric = float(episode_metrics.get("mpc_loss_mean", float("nan")))
         logger.info(
-            "Episode %s/%s | stage=%s (disturbance=%.2f) | rollout_return=%.3f | reward_mean=%.3f | elite_best=%.3f | elite_mean=%.3f | elites=%s",
+            (
+                "Episode %s/%s | stage=%s (disturbance=%.2f, progress=%.2f) | "
+                "return=%.3f | reward_mean=%.3f (raw=%.3f) | elite_best=%.3f | "
+                "lr=%.3e | entropy=%.3f | mpc_loss=%.3f | elites=%s"
+            ),
             episode + 1,
             total_episodes,
             stage_name,
             stage_disturbance,
+            log_stage_progress,
             episode_return,
             reward_mean,
+            raw_reward_mean,
             elite_best,
-            elite_mean,
+            effective_lr,
+            entropy_metric,
+            mpc_loss_metric,
             len(state.elites),
         )
 
@@ -438,15 +491,11 @@ def _collect_rollout(
         cached_plan = jnp.asarray(cached_plan, dtype=jnp.float32)
     reward_scale = float(config.reward_scale)
     reward_scale = reward_scale if reward_scale > 0.0 else 1.0
-    policy_weight_raw = max(float(config.policy_action_weight), 0.0)
-    mpc_weight_raw = max(float(config.mpc_action_weight), 0.0)
-    weight_sum = policy_weight_raw + mpc_weight_raw
-    if weight_sum <= 1e-6:
-        policy_weight = 0.5
-        mpc_weight = 0.5
-    else:
-        policy_weight = policy_weight_raw / weight_sum
-        mpc_weight = mpc_weight_raw / weight_sum
+    policy_weight, mpc_weight, stage_progress = _resolve_action_blend_weights(
+        config,
+        stage,
+        state.stage_episode,
+    )
     info_sums: Dict[str, float] | None = None
     info_abs_sums: Dict[str, float] | None = None
     info_max: Dict[str, float] | None = None
@@ -575,6 +624,7 @@ def _collect_rollout(
         info_metrics["mpc_saturation_mean"] = float(np.mean(mpc_saturation))
     info_metrics["action_blend_policy_weight"] = float(policy_weight)
     info_metrics["action_blend_mpc_weight"] = float(mpc_weight)
+    info_metrics["action_blend_progress"] = stage_progress
     info_metrics["reward_scale"] = reward_scale
     if raw_reward_buffer:
         raw_rewards = jnp.array(raw_reward_buffer)
@@ -806,15 +856,12 @@ def _evaluate_candidate(
     eval_max_steps = max_steps if max_steps is not None else config.evaluation_max_steps
     reward_scale = float(config.reward_scale)
     reward_scale = reward_scale if reward_scale > 0.0 else 1.0
-    policy_weight_raw = max(float(config.policy_action_weight), 0.0)
-    mpc_weight_raw = max(float(config.mpc_action_weight), 0.0)
-    weight_sum = policy_weight_raw + mpc_weight_raw
-    if weight_sum <= 1e-6:
-        policy_weight = 0.5
-        mpc_weight = 0.5
-    else:
-        policy_weight = policy_weight_raw / weight_sum
-        mpc_weight = mpc_weight_raw / weight_sum
+    policy_weight, mpc_weight, _ = _resolve_action_blend_weights(
+        config,
+        stage,
+        stage_episode=config.action_blend_transition_episodes,
+        progress_override=1.0,
+    )
     mpc_interval = max(1, int(config.mpc_interval))
     for _ in range(eval_episodes):
         obs = jnp.asarray(env.reset(disturbance_scale=stage.disturbance_scale), dtype=jnp.float32)
