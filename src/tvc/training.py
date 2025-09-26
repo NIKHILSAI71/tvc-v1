@@ -67,6 +67,7 @@ class PpoEvolutionConfig:
     plateau_factor: float = 0.6
     plateau_threshold: float = 1.0
     weight_decay: float = 1e-4
+    plateau_global_warmup_episodes: int = 60
     adaptive_lr_enabled: bool = True
     adaptive_lr_target_kl: float = 0.015
     adaptive_lr_lower_ratio: float = 0.45
@@ -84,6 +85,11 @@ class PpoEvolutionConfig:
     )
     curriculum_adaptation: bool = True
     curriculum_reward_smoothing: float = 0.25
+    reward_scale: float = 0.25
+    policy_action_weight: float = 0.6
+    mpc_action_weight: float = 0.4
+    plateau_warmup_episodes: int = 40
+    plateau_min_scale: float = 0.2
 
 
 @dataclass
@@ -98,7 +104,9 @@ class TrainingState:
     lr_schedule: Callable[[int], float] | None = None
     lr_scale: float = 1.0
     best_return: float = -float("inf")
+    best_stage_reward: float = -float("inf")
     plateau_counter: int = 0
+    last_improvement_episode: int = 0
     last_aux: Dict[str, float] = field(default_factory=dict)
     stage_index: int = 0
     stage_episode: int = 0
@@ -326,29 +334,56 @@ def train_controller(
         episode_metrics.update(stage_metrics)
         episode_metrics.update(evaluation_metrics)
 
+        global_episode = episode + 1
+        state.best_return = max(state.best_return, episode_return)
+        episodes_since_improvement_metric = global_episode - max(state.last_improvement_episode, 0)
+
         if config.use_plateau_schedule:
-            if episode_return > state.best_return + config.plateau_threshold:
-                state.best_return = episode_return
+            stage_episode = float(episode_metrics.get("stage_episode", 0.0))
+            smoothed_return = float(state.stage_reward_ema)
+            if math.isfinite(smoothed_return) and smoothed_return > state.best_stage_reward + config.plateau_threshold:
+                state.best_stage_reward = smoothed_return
                 state.plateau_counter = 0
+                state.last_improvement_episode = global_episode
             else:
-                state.plateau_counter += 1
-                if state.plateau_counter >= config.plateau_patience:
-                    new_scale = max(
-                        state.lr_scale * config.plateau_factor,
-                        config.min_learning_rate / max(config.learning_rate, 1e-12),
-                    )
-                    if new_scale < state.lr_scale:
-                        state.lr_scale = new_scale
-                        logger.info(
-                            "Learning-rate plateau detected (episode %s). Scaling LR to %.6e",
-                            episode + 1,
-                            float(base_lr) * state.lr_scale,
-                        )
+                warmup_passed = (
+                    stage_episode >= float(config.plateau_warmup_episodes)
+                    and global_episode >= int(config.plateau_global_warmup_episodes)
+                )
+                if not warmup_passed:
                     state.plateau_counter = 0
+                else:
+                    state.plateau_counter += 1
+                    episodes_since_improvement = global_episode - max(state.last_improvement_episode, 0)
+                    if (
+                        state.plateau_counter >= config.plateau_patience
+                        and episodes_since_improvement >= config.plateau_patience
+                    ):
+                        min_floor = max(
+                            config.min_learning_rate / max(config.learning_rate, 1e-12),
+                            config.plateau_min_scale,
+                        )
+                        scaled_scale = max(state.lr_scale * config.plateau_factor, min_floor)
+                        if scaled_scale < state.lr_scale - 1e-9:
+                            state.lr_scale = scaled_scale
+                            logger.info(
+                                "Learning-rate plateau detected (episode %s, stage=%s, ema=%.3f, best_ema=%.3f). Scaling LR to %.6e",
+                                global_episode,
+                                stage_name,
+                                smoothed_return,
+                                state.best_stage_reward,
+                                float(base_lr) * state.lr_scale,
+                            )
+                        state.plateau_counter = 0
+            episodes_since_improvement_metric = global_episode - max(state.last_improvement_episode, 0)
         if config.adaptive_lr_enabled:
-            state.lr_scale = float(np.clip(state.lr_scale, config.adaptive_lr_min_scale, config.adaptive_lr_max_scale))
+            lower_bound = max(config.adaptive_lr_min_scale, config.plateau_min_scale)
+            state.lr_scale = float(np.clip(state.lr_scale, lower_bound, config.adaptive_lr_max_scale))
+        best_stage_metric = state.best_stage_reward if math.isfinite(state.best_stage_reward) else float("nan")
         episode_metrics["plateau_counter"] = float(state.plateau_counter)
         episode_metrics["best_return"] = state.best_return
+        episode_metrics["best_stage_reward"] = best_stage_metric
+        episode_metrics["episodes_since_improvement"] = float(episodes_since_improvement_metric)
         state.history.append(episode_metrics)
 
         logger.info(
@@ -388,6 +423,7 @@ def _collect_rollout(
     mpc_action_buffer: List[jnp.ndarray] = []
     logprob_buffer: List[float] = []
     reward_buffer: List[float] = []
+    raw_reward_buffer: List[float] = []
     value_buffer: List[float] = []
     done_buffer: List[float] = []
 
@@ -400,6 +436,17 @@ def _collect_rollout(
     cached_plan = state.last_mpc_plan
     if cached_plan is not None:
         cached_plan = jnp.asarray(cached_plan, dtype=jnp.float32)
+    reward_scale = float(config.reward_scale)
+    reward_scale = reward_scale if reward_scale > 0.0 else 1.0
+    policy_weight_raw = max(float(config.policy_action_weight), 0.0)
+    mpc_weight_raw = max(float(config.mpc_action_weight), 0.0)
+    weight_sum = policy_weight_raw + mpc_weight_raw
+    if weight_sum <= 1e-6:
+        policy_weight = 0.5
+        mpc_weight = 0.5
+    else:
+        policy_weight = policy_weight_raw / weight_sum
+        mpc_weight = mpc_weight_raw / weight_sum
     info_sums: Dict[str, float] | None = None
     info_abs_sums: Dict[str, float] | None = None
     info_max: Dict[str, float] | None = None
@@ -434,8 +481,9 @@ def _collect_rollout(
             mpc_grad_norms.append(float(mpc_diag.get("mpc_grad_norm", 0.0)))
             mpc_iterations.append(float(mpc_diag.get("mpc_iterations", config.mpc_config.iterations)))
             mpc_saturation.append(float(mpc_diag.get("mpc_saturation", 0.0)))
+        blended_action = policy_weight * policy_action + mpc_weight * cached_mpc_action
         combined_action = jnp.clip(
-            policy_action + cached_mpc_action,
+            blended_action,
             -config.mpc_config.control_limit,
             config.mpc_config.control_limit,
         )
@@ -443,13 +491,16 @@ def _collect_rollout(
         log_prob = _gaussian_log_prob(mean, log_std, policy_action)
 
         result: StepResult = env.step(np.array(combined_action))
+        raw_reward = float(result.reward)
+        scaled_reward = raw_reward * reward_scale
 
         obs_buffer.append(norm_observation)
         action_buffer.append(policy_action)
         applied_action_buffer.append(combined_action)
         mpc_action_buffer.append(cached_mpc_action)
         logprob_buffer.append(float(log_prob))
-        reward_buffer.append(result.reward)
+        reward_buffer.append(scaled_reward)
+        raw_reward_buffer.append(raw_reward)
         value_buffer.append(float(value))
         done_buffer.append(float(result.done))
 
@@ -522,6 +573,13 @@ def _collect_rollout(
         info_metrics["mpc_grad_norm_mean"] = float(np.mean(mpc_grad_norms))
         info_metrics["mpc_iterations_mean"] = float(np.mean(mpc_iterations))
         info_metrics["mpc_saturation_mean"] = float(np.mean(mpc_saturation))
+    info_metrics["action_blend_policy_weight"] = float(policy_weight)
+    info_metrics["action_blend_mpc_weight"] = float(mpc_weight)
+    info_metrics["reward_scale"] = reward_scale
+    if raw_reward_buffer:
+        raw_rewards = jnp.array(raw_reward_buffer)
+        info_metrics["reward_raw_mean"] = float(jnp.mean(raw_rewards))
+        info_metrics["reward_raw_std"] = float(jnp.std(raw_rewards))
     state.last_mpc_plan = cached_plan
     return batch, info_metrics
 
@@ -587,6 +645,10 @@ def _update_stage_progress(
         state.stage_success_counter = 0
         state.stage_reward_ema = 0.0
         state.last_mpc_plan = None
+        state.best_return = -float("inf")
+        state.best_stage_reward = -float("inf")
+        state.plateau_counter = 0
+        state.last_improvement_episode = 0
         stage = curriculum[state.stage_index]
         state.current_stage_name = stage.name
         metrics["stage_transition"] = 1.0
@@ -742,16 +804,45 @@ def _evaluate_candidate(
     )
     eval_episodes = episodes if episodes is not None else config.evaluation_episodes
     eval_max_steps = max_steps if max_steps is not None else config.evaluation_max_steps
+    reward_scale = float(config.reward_scale)
+    reward_scale = reward_scale if reward_scale > 0.0 else 1.0
+    policy_weight_raw = max(float(config.policy_action_weight), 0.0)
+    mpc_weight_raw = max(float(config.mpc_action_weight), 0.0)
+    weight_sum = policy_weight_raw + mpc_weight_raw
+    if weight_sum <= 1e-6:
+        policy_weight = 0.5
+        mpc_weight = 0.5
+    else:
+        policy_weight = policy_weight_raw / weight_sum
+        mpc_weight = mpc_weight_raw / weight_sum
+    mpc_interval = max(1, int(config.mpc_interval))
     for _ in range(eval_episodes):
         obs = jnp.asarray(env.reset(disturbance_scale=stage.disturbance_scale), dtype=jnp.float32)
         local_rms = _update_normalizer(base_normalizer, obs)
         norm_obs = _normalize_observation(local_rms, obs)
         done = False
         steps = 0
+        cached_plan = None
+        cached_mpc_action = jnp.zeros(2, dtype=jnp.float32)
         while not done and steps < eval_max_steps:
-            action = funcs.actor(params, norm_obs, None, True)
+            if steps % mpc_interval == 0:
+                rocket_state = _gather_state(env)
+                cached_mpc_action, _, cached_plan = compute_tvc_mpc_action(
+                    rocket_state,
+                    stage.target_state,
+                    config.params,
+                    config.mpc_config,
+                    warm_start=cached_plan,
+                )
+            policy_action = funcs.actor(params, norm_obs, None, True)
+            blended_action = policy_weight * policy_action + mpc_weight * cached_mpc_action
+            action = jnp.clip(
+                blended_action,
+                -config.mpc_config.control_limit,
+                config.mpc_config.control_limit,
+            )
             result = env.step(np.array(action))
-            total += result.reward
+            total += float(result.reward) * reward_scale
             obs = jnp.asarray(result.observation, dtype=jnp.float32)
             local_rms = _update_normalizer(local_rms, obs)
             norm_obs = _normalize_observation(local_rms, obs)
