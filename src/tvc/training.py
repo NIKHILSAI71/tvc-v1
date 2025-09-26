@@ -44,15 +44,17 @@ class PpoEvolutionConfig:
     num_epochs: int = 8
     minibatch_size: int = 64
     mutation_scale: float = 0.02
-    population_size: int = 8
-    elite_keep: int = 2
+    population_size: int = 0
+    elite_keep: int = 0
+    use_evolution: bool = False
+    evolution_adoption_margin: float = 10.0
     policy_config: PolicyConfig = PolicyConfig()
     mpc_config: MpcConfig = MpcConfig(horizon=12, iterations=12, learning_rate=0.06)
     params: RocketParams = RocketParams()
     mpc_interval: int = 3
-    evaluation_episodes: int = 3
-    evaluation_max_steps: int = 250
-    policy_eval_interval: int = 3
+    evaluation_episodes: int = 1
+    evaluation_max_steps: int = 200
+    policy_eval_interval: int = 0
     policy_eval_episodes: Optional[int] = None
     policy_eval_max_steps: Optional[int] = None
     value_clip_epsilon: float = 0.2
@@ -334,7 +336,15 @@ def train_controller(
         _maybe_update_adaptive_lr(state, config)
         episode_return = float(jnp.sum(trajectories["rewards"]))
         reward_mean = float(jnp.mean(trajectories["rewards"]))
-        state, elite_best, elite_mean = _evolutionary_update(env, stage, state, policy_funcs, config)
+        state, elite_best, elite_mean, evolution_adopted = _evolutionary_update(
+            env,
+            stage,
+            state,
+            policy_funcs,
+            config,
+            optimiser,
+            episode_return,
+        )
 
         base_lr = state.lr_schedule(state.update_step) if state.lr_schedule is not None else config.learning_rate
         effective_lr = float(base_lr) * state.lr_scale
@@ -374,6 +384,8 @@ def train_controller(
             episode_metrics.update(state.last_aux)
         episode_metrics.update(stage_metrics)
         episode_metrics.update(evaluation_metrics)
+        if config.use_evolution:
+            episode_metrics["evolution_adopted"] = float(bool(evolution_adopted))
 
         global_episode = episode + 1
         state.best_return = max(state.best_return, episode_return)
@@ -759,7 +771,8 @@ def _ppo_update(
         entropy = jnp.mean(
             jnp.sum(log_std + 0.5 * jnp.log(2.0 * jnp.pi * jnp.e), axis=-1)
         )
-        approx_kl = 0.5 * jnp.mean((log_prob - minibatch["log_probs"]) ** 2)
+        approx_kl = jnp.mean(minibatch["log_probs"] - log_prob)
+        approx_kl = jnp.maximum(approx_kl, 0.0)
         clip_fraction = jnp.mean((jnp.abs(ratio - 1.0) > config.clip_epsilon).astype(jnp.float32))
         total_loss = actor_loss + config.value_coef * value_loss - config.entropy_coef * entropy
         return total_loss, (entropy, approx_kl, actor_loss, value_loss, clip_fraction)
@@ -813,26 +826,49 @@ def _evolutionary_update(
     state: TrainingState,
     funcs,
     config: PpoEvolutionConfig,
-) -> Tuple[TrainingState, float, float]:
+    optimiser: optax.GradientTransformation,
+    baseline_reward: float,
+) -> Tuple[TrainingState, float, float, bool]:
+    if not config.use_evolution or config.population_size <= 1 or config.elite_keep <= 0:
+        state.elites = []
+        return state, baseline_reward, baseline_reward, False
+
     rng = state.rng
-    population = [state.params] + state.elites
+    population = [state.params] + list(state.elites)
     while len(population) < config.population_size:
         rng, key = jax.random.split(rng)
         population.append(mutate_parameters(key, state.params, config.mutation_scale))
 
-    scores = []
+    scores: List[float] = []
     for candidate in population:
         reward = _evaluate_candidate(env, stage, candidate, funcs, config, state.obs_rms)
         scores.append(reward)
 
-    elite_indices = np.argsort(scores)[-config.elite_keep :][::-1]
+    if not scores:
+        state.elites = []
+        state.rng = rng
+        return state, baseline_reward, baseline_reward, False
+
+    elite_keep = max(1, min(config.elite_keep, len(population)))
+    elite_indices = np.argsort(scores)[-elite_keep:][::-1]
     elites = [population[i] for i in elite_indices]
     state.elites = elites
     state.rng = rng
 
-    best_reward = float(np.max(scores)) if scores else float("nan")
-    mean_reward = float(np.mean(scores)) if scores else float("nan")
-    return state, best_reward, mean_reward
+    best_reward = float(np.max(scores))
+    mean_reward = float(np.mean(scores))
+
+    adopted = False
+    best_candidate = elites[0] if elites else None
+    if (
+        best_candidate is not None
+        and best_reward > baseline_reward + config.evolution_adoption_margin
+    ):
+        state.params = best_candidate
+        state.opt_state = optimiser.init(best_candidate)
+        adopted = True
+
+    return state, best_reward, mean_reward, adopted
 
 
 def _evaluate_candidate(
