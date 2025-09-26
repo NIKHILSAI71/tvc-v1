@@ -42,7 +42,7 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     train_parser.add_argument(
     "--episodes",
     type=int,
-    default=10,
+    default=480,
     help="Number of training episodes to run",
     )
     train_parser.add_argument(
