@@ -96,6 +96,24 @@ To train the controller:
 python -m tvc train --episodes 100 --seed 42
 ```
 
+### Training defaults
+
+The training stack now includes stability-oriented defaults:
+
+- Softer curriculum thresholds (`reward_threshold ≥ -110`) with gentler disturbances for earlier stages.
+- Reward shaping bonuses for low pitch and lateral error, plus explicit control smoothness penalties.
+- Progressive MPC-to-policy action blending (70→20% MPC) over the first ~300 stage episodes.
+- PPO hyperparameters tuned for negative-reward regimes (`reward_scale=1.0`, `clip ε=0.15`, `rollout_length=512`, `entropy_coef=5e-3`).
+- A deeper policy network (512-512-256-128) with lower dropout and conservative log-std initialisation.
+
+#### CLI overrides
+
+`python -m tvc train` now exposes key knobs so runs can be customised without editing code:
+
+- `--learning-rate`, `--entropy-coef`, `--reward-scale`, `--rollout-length` override the PPO loop.
+- `--policy-weight`, `--mpc-weight`, `--policy-warmup-weight`, `--mpc-warmup-weight`, `--blend-transition-episodes`, `--no-progressive-blend` control the MPC/policy blend schedule.
+- Existing plateau-management flags still apply; combine them to experiment with different LR reduction strategies.
+
 Each training invocation now creates a timestamped run directory under `training/` by default, e.g. `training/run-2025-09-24-04-30PM/`. The folder contains:
 
 - `training.log` – the full textual log for the run.
