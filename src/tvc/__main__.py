@@ -217,6 +217,47 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         default=None,
         help="Maximum steps per evaluation episode",
     )
+    train_parser.add_argument(
+        "--disable-mpc-bc",
+        action="store_true",
+        help="Skip the MPC behaviour-cloning warmup before PPO",
+    )
+    train_parser.add_argument(
+        "--mpc-bc-steps",
+        type=int,
+        default=None,
+        help="Number of environment steps collected for MPC behaviour cloning",
+    )
+    train_parser.add_argument(
+        "--mpc-bc-epochs",
+        type=int,
+        default=None,
+        help="Number of optimisation epochs for MPC behaviour cloning",
+    )
+    train_parser.add_argument(
+        "--mpc-bc-batch-size",
+        type=int,
+        default=None,
+        help="Batch size used during MPC behaviour-cloning updates",
+    )
+    train_parser.add_argument(
+        "--mpc-bc-learning-rate",
+        type=float,
+        default=None,
+        help="Learning rate for the MPC behaviour-cloning optimiser",
+    )
+    train_parser.add_argument(
+        "--mpc-bc-noise-scale",
+        type=float,
+        default=None,
+        help="Standard deviation of exploratory noise applied to MPC actions during warmup",
+    )
+    train_parser.add_argument(
+        "--mpc-bc-stage",
+        type=str,
+        default=None,
+        help="Curriculum stage name used when collecting MPC behaviour-cloning data",
+    )
 
     test_parser = subparsers.add_parser(
         "test",
@@ -284,6 +325,13 @@ def _run_train(
     policy_eval_interval: int | None,
     policy_eval_episodes: int | None,
     policy_eval_max_steps: int | None,
+    disable_mpc_bc: bool,
+    mpc_bc_steps: int | None,
+    mpc_bc_epochs: int | None,
+    mpc_bc_batch_size: int | None,
+    mpc_bc_learning_rate: float | None,
+    mpc_bc_noise_scale: float | None,
+    mpc_bc_stage: str | None,
 ) -> None:
     timestamp = _dt.datetime.now().strftime("run-%Y-%m-%d-%I-%M%p")
     run_name = _sanitise_tag(run_tag) if run_tag else timestamp
@@ -349,6 +397,20 @@ def _run_train(
         overrides["policy_eval_episodes"] = max(1, policy_eval_episodes)
     if policy_eval_max_steps is not None:
         overrides["policy_eval_max_steps"] = max(1, policy_eval_max_steps)
+    if disable_mpc_bc:
+        overrides["mpc_bc_enabled"] = False
+    if mpc_bc_steps is not None:
+        overrides["mpc_bc_steps"] = max(0, mpc_bc_steps)
+    if mpc_bc_epochs is not None:
+        overrides["mpc_bc_epochs"] = max(1, mpc_bc_epochs)
+    if mpc_bc_batch_size is not None:
+        overrides["mpc_bc_batch_size"] = max(1, mpc_bc_batch_size)
+    if mpc_bc_learning_rate is not None:
+        overrides["mpc_bc_learning_rate"] = float(mpc_bc_learning_rate)
+    if mpc_bc_noise_scale is not None:
+        overrides["mpc_bc_noise_scale"] = float(max(0.0, mpc_bc_noise_scale))
+    if mpc_bc_stage is not None:
+        overrides["mpc_bc_stage_name"] = str(mpc_bc_stage)
     if overrides:
         config = replace(config, **overrides)
     logger.info(
@@ -417,6 +479,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             policy_eval_interval=args.policy_eval_interval,
             policy_eval_episodes=args.policy_eval_episodes,
             policy_eval_max_steps=args.policy_eval_max_steps,
+            disable_mpc_bc=args.disable_mpc_bc,
+            mpc_bc_steps=args.mpc_bc_steps,
+            mpc_bc_epochs=args.mpc_bc_epochs,
+            mpc_bc_batch_size=args.mpc_bc_batch_size,
+            mpc_bc_learning_rate=args.mpc_bc_learning_rate,
+            mpc_bc_noise_scale=args.mpc_bc_noise_scale,
+            mpc_bc_stage=args.mpc_bc_stage,
         )
         return 0
     if args.command == "test":
