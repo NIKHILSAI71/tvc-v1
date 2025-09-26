@@ -14,7 +14,7 @@ import csv
 import json
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -49,7 +49,7 @@ class PpoEvolutionConfig:
     use_evolution: bool = False
     evolution_adoption_margin: float = 10.0
     policy_config: PolicyConfig = PolicyConfig()
-    mpc_config: MpcConfig = MpcConfig(horizon=12, iterations=12, learning_rate=0.06)
+    mpc_config: MpcConfig = MpcConfig()
     params: RocketParams = RocketParams()
     mpc_interval: int = 3
     evaluation_episodes: int = 1
@@ -103,6 +103,15 @@ class PpoEvolutionConfig:
     mpc_loss_ema_decay: float = 0.5
     mpc_min_weight: float = 0.02
     adaptive_lr_cooldown_episodes: int = 3
+    mpc_bc_enabled: bool = True
+    mpc_bc_steps: int = 2048
+    mpc_bc_batch_size: int = 256
+    mpc_bc_epochs: int = 30
+    mpc_bc_learning_rate: float = 1e-3
+    mpc_bc_noise_scale: float = 0.015
+    mpc_bc_stage_name: Optional[str] = "pad_hover"
+    mpc_bc_log_every: int = 10
+    mpc_bc_loss_reg: float = 1e-4
 
 
 @dataclass
@@ -197,6 +206,152 @@ def _normalize_observation(rms: RunningNormalizer, observation: jnp.ndarray) -> 
     variance = rms.m2 / rms.count
     variance = jnp.maximum(variance, 1e-6)
     return (obs - rms.mean) / jnp.sqrt(variance)
+
+
+def _select_pretrain_stage(config: PpoEvolutionConfig, curriculum: List[CurriculumStage]) -> CurriculumStage | None:
+    if not curriculum:
+        return None
+    if config.mpc_bc_stage_name is None:
+        return curriculum[0]
+    for stage in curriculum:
+        if stage.name == config.mpc_bc_stage_name:
+            return stage
+    return curriculum[0]
+
+
+def _mpc_behavior_cloning_warmup(
+    env: Tvc2DEnv,
+    stage: CurriculumStage | None,
+    params: Any,
+    funcs,
+    config: PpoEvolutionConfig,
+    rng: jax.Array,
+    obs_rms: RunningNormalizer,
+    logger: logging.Logger,
+) -> Tuple[Any, RunningNormalizer, jax.Array, Dict[str, float]]:
+    if not config.mpc_bc_enabled or config.mpc_bc_steps <= 0 or stage is None:
+        return params, obs_rms, rng, {}
+
+    steps = int(config.mpc_bc_steps)
+    batch_size = max(1, int(config.mpc_bc_batch_size))
+    epochs = max(1, int(config.mpc_bc_epochs))
+    noise_scale = float(max(config.mpc_bc_noise_scale, 0.0))
+    logger.info(
+        "MPC behaviour-cloning warmup starting | stage=%s steps=%s epochs=%s batch=%s lr=%.3g noise=%.3g",
+        stage.name,
+        steps,
+        epochs,
+        batch_size,
+        config.mpc_bc_learning_rate,
+        noise_scale,
+    )
+
+    obs_list: List[jnp.ndarray] = []
+    action_list: List[jnp.ndarray] = []
+    warm_plan: jnp.ndarray | None = None
+    observation = jnp.asarray(env.reset(disturbance_scale=stage.disturbance_scale), dtype=jnp.float32)
+    local_rms = obs_rms
+    env_limit = float(getattr(env, "ctrl_limit", config.mpc_config.control_limit))
+    action_limit = float(min(env_limit, config.mpc_config.control_limit))
+
+    for step in range(steps):
+        local_rms = _update_normalizer(local_rms, observation)
+        norm_obs = _normalize_observation(local_rms, observation)
+        rocket_state = _gather_state(env)
+        mpc_action, _, warm_plan = compute_tvc_mpc_action(
+            rocket_state,
+            stage.target_state,
+            config.params,
+            config.mpc_config,
+            warm_start=warm_plan,
+        )
+        if noise_scale > 0.0:
+            rng, noise_key = jax.random.split(rng)
+            noise = noise_scale * jax.random.normal(noise_key, shape=mpc_action.shape)
+            mpc_action = jnp.clip(
+                mpc_action + noise,
+                -action_limit,
+                action_limit,
+            )
+        obs_list.append(norm_obs)
+        action_list.append(mpc_action)
+        result = env.step(np.asarray(jnp.clip(mpc_action, -action_limit, action_limit), dtype=np.float32))
+        observation = jnp.asarray(result.observation, dtype=jnp.float32)
+        if result.done:
+            observation = jnp.asarray(env.reset(disturbance_scale=stage.disturbance_scale), dtype=jnp.float32)
+            warm_plan = None
+
+    dataset_obs = jnp.stack(obs_list)
+    dataset_actions = jnp.stack(action_list)
+
+    mean_initial, _, _ = funcs.distribution(params, dataset_obs, key=None, deterministic=True)
+    initial_mse = jnp.mean(jnp.square(mean_initial - dataset_actions))
+
+    optimiser = optax.adam(config.mpc_bc_learning_rate)
+    opt_state = optimiser.init(params)
+
+    def loss_fn(variables: Any, batch_obs: jnp.ndarray, batch_actions: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        mean, log_std, _ = funcs.distribution(variables, batch_obs, key=None, deterministic=True)
+        mse = jnp.mean(jnp.square(mean - batch_actions))
+        std_reg = jnp.mean(jnp.square(log_std - config.policy_config.log_std_init))
+        loss = mse + float(config.mpc_bc_loss_reg) * std_reg
+        return loss, mse
+
+    @jax.jit
+    def train_step(
+        variables: Any,
+        opt_state_in: optax.OptState,
+        batch_obs: jnp.ndarray,
+        batch_actions: jnp.ndarray,
+    ) -> Tuple[Any, optax.OptState, jnp.ndarray, jnp.ndarray]:
+        (loss_value, mse_value), grads = jax.value_and_grad(loss_fn, has_aux=True)(variables, batch_obs, batch_actions)
+        updates, opt_state_out = optimiser.update(grads, opt_state_in, variables)
+        variables = optax.apply_updates(variables, updates)
+        return variables, opt_state_out, loss_value, mse_value
+
+    num_samples = dataset_obs.shape[0]
+    last_loss = jnp.array(0.0, dtype=jnp.float32)
+    last_mse = jnp.array(0.0, dtype=jnp.float32)
+
+    for epoch in range(epochs):
+        perm = np.random.permutation(num_samples)
+        for start in range(0, num_samples, batch_size):
+            idx = perm[start : start + batch_size]
+            if idx.size == 0:
+                continue
+            batch_obs = dataset_obs[idx]
+            batch_actions = dataset_actions[idx]
+            params, opt_state, last_loss, last_mse = train_step(params, opt_state, batch_obs, batch_actions)
+        if config.mpc_bc_log_every > 0 and (epoch + 1) % config.mpc_bc_log_every == 0:
+            logger.debug(
+                "MPC BC epoch %s/%s | loss=%.5f mse=%.5f",
+                epoch + 1,
+                epochs,
+                float(last_loss),
+                float(last_mse),
+            )
+
+    mean_pred, _, _ = funcs.distribution(params, dataset_obs, key=None, deterministic=True)
+    final_mse = jnp.mean(jnp.square(mean_pred - dataset_actions))
+    metrics = {
+        "bc_final_mse": float(final_mse),
+        "bc_last_loss": float(last_loss),
+        "bc_dataset_steps": float(num_samples),
+        "bc_epochs": float(epochs),
+        "bc_initial_mse": float(initial_mse),
+    }
+
+    logger.info(
+        "MPC behaviour-cloning warmup complete | mse=%.5f -> %.5f loss=%.5f steps=%s",
+        metrics["bc_initial_mse"],
+        metrics["bc_final_mse"],
+        metrics["bc_last_loss"],
+        num_samples,
+    )
+
+    # Reset environment to a clean state before PPO rollouts.
+    env.reset(disturbance_scale=stage.disturbance_scale)
+    return params, local_rms, rng, metrics
 
 
 def _resolve_action_blend_weights(
@@ -319,7 +474,11 @@ def train_controller(
 ) -> TrainingState:
     """Runs PPO with evolutionary refinement and MPC guided actions."""
 
-    policy_funcs = build_policy_network(config.policy_config)
+    aligned_policy_config = replace(
+        config.policy_config,
+        action_limit=float(config.mpc_config.control_limit),
+    )
+    policy_funcs = build_policy_network(aligned_policy_config)
     curriculum = build_curriculum()
     initial_stage = curriculum[0] if curriculum else None
     logger = logging.getLogger("tvc.training")
@@ -334,6 +493,20 @@ def train_controller(
     sample_obs = jnp.asarray(env.reset(disturbance_scale=disturbance_scale), dtype=jnp.float32)
     rng, init_key = jax.random.split(rng)
     params = policy_funcs.init(init_key, sample_obs)
+    obs_rms = RunningNormalizer.initialise(sample_obs)
+    pretrain_stage = _select_pretrain_stage(config, curriculum)
+    params, obs_rms, rng, bc_metrics = _mpc_behavior_cloning_warmup(
+        env,
+        pretrain_stage,
+        params,
+        policy_funcs,
+        config,
+        rng,
+        obs_rms,
+        logger,
+    )
+    sample_obs = jnp.asarray(env.reset(disturbance_scale=disturbance_scale), dtype=jnp.float32)
+    obs_rms = _update_normalizer(obs_rms, sample_obs)
 
     updates_per_epoch = max(1, math.ceil(config.rollout_length / config.minibatch_size))
     total_updates = total_episodes * config.num_epochs * updates_per_epoch
@@ -357,10 +530,13 @@ def train_controller(
         opt_state=opt_state,
         elites=elites,
         rng=rng,
-        obs_rms=RunningNormalizer.initialise(sample_obs),
+        obs_rms=obs_rms,
         lr_schedule=lr_schedule,
         current_stage_name=curriculum[0].name if curriculum else None,
     )
+    if bc_metrics:
+        state.history.append({"episode": 0.0, **bc_metrics})
+        state.last_aux.update(bc_metrics)
     if config.adaptive_lr_enabled and curriculum:
         initial_bias = config.stage_lr_bias.get(curriculum[0].name)
         if initial_bias is not None:
@@ -548,6 +724,8 @@ def _collect_rollout(
     cached_plan = state.last_mpc_plan
     if cached_plan is not None:
         cached_plan = jnp.asarray(cached_plan, dtype=jnp.float32)
+    env_limit = float(getattr(env, "ctrl_limit", config.mpc_config.control_limit))
+    action_limit = float(min(env_limit, config.mpc_config.control_limit))
     reward_scale = float(config.reward_scale)
     reward_scale = reward_scale if reward_scale > 0.0 else 1.0
     policy_weight_raw, mpc_weight_raw, stage_progress = _resolve_action_blend_weights(
@@ -564,6 +742,7 @@ def _collect_rollout(
     mpc_grad_norms: List[float] = []
     mpc_iterations: List[float] = []
     mpc_saturation: List[float] = []
+    normalised_reward_buffer: List[float] = []
 
     for step in range(config.rollout_length):
         state.rng, policy_key, dropout_key = jax.random.split(state.rng, 3)
@@ -593,15 +772,18 @@ def _collect_rollout(
         blended_action = policy_weight * policy_action + mpc_weight * cached_mpc_action
         combined_action = jnp.clip(
             blended_action,
-            -config.mpc_config.control_limit,
-            config.mpc_config.control_limit,
+            -action_limit,
+            action_limit,
         )
 
         log_prob = _gaussian_log_prob(mean, log_std, policy_action)
 
         result: StepResult = env.step(np.array(combined_action))
-        raw_reward = float(result.reward)
+        result_info = result.info
+        normalised_reward = float(result_info.get("reward_normalised", result.reward))
+        raw_reward = float(result_info.get("raw_reward", normalised_reward))
         scaled_reward = raw_reward * reward_scale
+        normalised_reward_buffer.append(normalised_reward)
 
         obs_buffer.append(norm_observation)
         action_buffer.append(policy_action)
@@ -703,6 +885,10 @@ def _collect_rollout(
         raw_rewards = jnp.array(raw_reward_buffer)
         info_metrics["reward_raw_mean"] = float(jnp.mean(raw_rewards))
         info_metrics["reward_raw_std"] = float(jnp.std(raw_rewards))
+    if normalised_reward_buffer:
+        norm_rewards = jnp.array(normalised_reward_buffer)
+        info_metrics["reward_normalised_mean"] = float(jnp.mean(norm_rewards))
+        info_metrics["reward_normalised_std"] = float(jnp.std(norm_rewards))
     state.last_mpc_plan = cached_plan
     return batch, info_metrics
 
@@ -984,6 +1170,8 @@ def _evaluate_candidate(
     eval_max_steps = max_steps if max_steps is not None else config.evaluation_max_steps
     reward_scale = float(config.reward_scale)
     reward_scale = reward_scale if reward_scale > 0.0 else 1.0
+    env_limit = float(getattr(env, "ctrl_limit", config.mpc_config.control_limit))
+    action_limit = float(min(env_limit, config.mpc_config.control_limit))
     policy_weight, mpc_weight, _ = _resolve_action_blend_weights(
         config,
         stage,
@@ -1013,11 +1201,13 @@ def _evaluate_candidate(
             blended_action = policy_weight * policy_action + mpc_weight * cached_mpc_action
             action = jnp.clip(
                 blended_action,
-                -config.mpc_config.control_limit,
-                config.mpc_config.control_limit,
+                -action_limit,
+                action_limit,
             )
             result = env.step(np.array(action))
-            total += float(result.reward) * reward_scale
+            result_info = result.info
+            raw_reward = float(result_info.get("raw_reward", result.reward))
+            total += raw_reward * reward_scale
             obs = jnp.asarray(result.observation, dtype=jnp.float32)
             local_rms = _update_normalizer(local_rms, obs)
             norm_obs = _normalize_observation(local_rms, obs)
