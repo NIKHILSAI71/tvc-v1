@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple
 
+import math
+
 import mujoco as _mujoco
 import numpy as np
 from mujoco import mjx
@@ -64,6 +66,12 @@ class Tvc2DEnv:
         self.max_steps = int(max_steps)
         self._rng = np.random.default_rng(seed)
         self._step_counter = 0
+        # Reward statistics for on-the-fly normalisation.
+        self._reward_count = 0.0
+        self._reward_mean = 0.0
+        self._reward_m2 = 0.0
+        self._reward_norm_warmup = 64
+        self._reward_norm_clip = 6.0
         mujoco.mj_forward(self.model, self.data)
 
     def apply_rocket_params(self, params: RocketParams | None) -> None:
@@ -211,24 +219,52 @@ class Tvc2DEnv:
         altitude_error = 4.0 - float(self.data.qpos[2])
         vertical_vel = float(self.data.qvel[2])
         jerk = float(np.linalg.norm(self.data.qacc[:3]))
-        ctrl_smooth = float(np.linalg.norm(np.diff(self.data.ctrl)))
+        ctrl_jitter = float(np.linalg.norm(np.diff(self.data.ctrl)))
+        ctrl_magnitude = float(np.linalg.norm(self.data.ctrl[1:3]))
 
-        penalty = 4.0 * pitch**2 + 0.5 * pitch_rate**2 + 0.3 * lateral**2 + 0.1 * lateral_vel**2
-        penalty += 0.25 * altitude_error**2 + 0.12 * vertical_vel**2
-        penalty += 0.05 * jerk + 0.02 * ctrl_smooth
+        # Normalised quadratic costs using scenario-appropriate tolerances.
+        def _quad(value: float, tolerance: float) -> float:
+            scale = max(tolerance, 1e-6)
+            return (value / scale) ** 2
 
-        altitude_bonus = float(0.02 * np.clip(4.0 - abs(altitude_error), 0.0, 4.0))
-        action_smooth_penalty = float(0.0015 * np.linalg.norm(self.data.ctrl[1:3]))
+        pitch_cost = _quad(pitch, 0.18)
+        pitch_rate_cost = _quad(pitch_rate, 0.6)
+        lateral_cost = _quad(lateral, 1.0)
+        lateral_vel_cost = _quad(lateral_vel, 1.2)
+        altitude_cost = _quad(altitude_error, 0.8)
+        vertical_vel_cost = _quad(vertical_vel, 1.4)
+        jerk_cost = _quad(jerk, 40.0)
+        ctrl_jitter_cost = _quad(ctrl_jitter, 0.25)
+        ctrl_mag_cost = _quad(ctrl_magnitude, 0.28)
 
-        stability_bonus = 0.0
-        if abs(pitch) < 0.12 and abs(lateral) < 0.6:
-            stability_bonus += 0.08
-            if abs(pitch_rate) < 0.25 and abs(lateral_vel) < 0.5:
-                stability_bonus += 0.04
+        penalty = (
+            0.38 * pitch_cost
+            + 0.16 * pitch_rate_cost
+            + 0.26 * lateral_cost
+            + 0.12 * lateral_vel_cost
+            + 0.34 * altitude_cost
+            + 0.22 * vertical_vel_cost
+            + 0.05 * jerk_cost
+            + 0.04 * ctrl_jitter_cost
+            + 0.03 * ctrl_mag_cost
+        )
 
-        shaping = stability_bonus + altitude_bonus - action_smooth_penalty
-        reward = float(-penalty + shaping)
-        return reward, {
+        # Smooth positive shaping encouraging hover stability and gentle control.
+        stability_bonus = float(
+            0.45
+            * math.exp(-0.5 * ((pitch / 0.11) ** 2 + (lateral / 0.55) ** 2))
+        )
+        hover_bonus = float(
+            0.35 * math.exp(-0.5 * ((altitude_error / 0.35) ** 2 + (vertical_vel / 0.45) ** 2))
+        )
+        attitude_bonus = float(0.25 * math.exp(-0.5 * (pitch_rate / 0.35) ** 2))
+        action_bonus = float(0.12 * math.exp(-0.5 * (ctrl_magnitude / 0.18) ** 2))
+
+        raw_reward = 1.0 - penalty + stability_bonus + hover_bonus + attitude_bonus + action_bonus
+        raw_reward = float(np.clip(raw_reward, -5.0, 3.0))
+        normalised_reward, reward_std = self._normalise_reward(raw_reward)
+
+        return normalised_reward, {
             "pitch_error": pitch,
             "pitch_rate": pitch_rate,
             "lateral": lateral,
@@ -236,12 +272,34 @@ class Tvc2DEnv:
             "altitude_error": altitude_error,
             "vertical_velocity": vertical_vel,
             "jerk": jerk,
+            "ctrl_jitter": ctrl_jitter,
+            "ctrl_magnitude": ctrl_magnitude,
             "reward_penalty": penalty,
             "stability_bonus": stability_bonus,
-            "altitude_bonus": altitude_bonus,
-            "ctrl_l2_penalty": action_smooth_penalty,
-            "reward_shaping": shaping,
+            "hover_bonus": hover_bonus,
+            "attitude_bonus": attitude_bonus,
+            "action_bonus": action_bonus,
+            "raw_reward": raw_reward,
+            "reward_normalised": normalised_reward,
+            "reward_running_mean": self._reward_mean,
+            "reward_running_std": reward_std,
         }
+
+    def _normalise_reward(self, value: float) -> Tuple[float, float]:
+        self._reward_count += 1.0
+        delta = value - self._reward_mean
+        self._reward_mean += delta / self._reward_count
+        self._reward_m2 += delta * (value - self._reward_mean)
+
+        if self._reward_count < self._reward_norm_warmup:
+            return value, 0.0
+
+        variance = self._reward_m2 / max(self._reward_count - 1.0, 1.0)
+        variance = max(float(variance), 1e-6)
+        std = float(math.sqrt(variance))
+        normalised = (value - self._reward_mean) / std
+        normalised = float(np.clip(normalised, -self._reward_norm_clip, self._reward_norm_clip))
+        return normalised, std
 
 
 def _default_asset_path() -> str:
