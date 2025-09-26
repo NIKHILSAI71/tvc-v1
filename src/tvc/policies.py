@@ -48,7 +48,7 @@ class PolicyConfig:
 
     hidden_dims: Tuple[int, ...] = (512, 512, 256, 128)
     activation: Callable[[jnp.ndarray], jnp.ndarray] = nn.silu
-    log_std_init: float = -0.8
+    log_std_init: float = -0.3
     dropout_rate: float = 0.05
     use_layer_norm: bool = True
 
