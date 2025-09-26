@@ -62,6 +62,8 @@ class PpoEvolutionConfig:
     use_lr_schedule: bool = True
     lr_warmup_fraction: float = 0.2
     min_learning_rate: float = 5e-6
+    lr_final_fraction: float = 0.4
+    schedule_min_updates: int = 1500
     entropy_coef: float = 5e-3
     value_coef: float = 1.0
     use_plateau_schedule: bool = True
@@ -88,11 +90,11 @@ class PpoEvolutionConfig:
     curriculum_adaptation: bool = True
     curriculum_reward_smoothing: float = 0.25
     reward_scale: float = 1.0
-    policy_action_weight: float = 0.75
-    mpc_action_weight: float = 0.25
-    policy_action_weight_warmup: float = 0.3
-    mpc_action_weight_warmup: float = 0.7
-    action_blend_transition_episodes: int = 300
+    policy_action_weight: float = 0.9
+    mpc_action_weight: float = 0.1
+    policy_action_weight_warmup: float = 0.6
+    mpc_action_weight_warmup: float = 0.4
+    action_blend_transition_episodes: int = 120
     progressive_action_blend: bool = True
     plateau_warmup_episodes: int = 40
     plateau_min_scale: float = 0.2
@@ -142,15 +144,16 @@ def _build_optimizer(
     schedule: Callable[[int], float] | None = None
     learning_rate: Any = config.learning_rate
 
-    if config.use_lr_schedule and total_updates and total_updates > 0:
+    if config.use_lr_schedule and total_updates and total_updates >= max(1, config.schedule_min_updates):
         warmup_steps = max(1, int(config.lr_warmup_fraction * total_updates))
         decay_steps = max(1, total_updates - warmup_steps)
+        end_value = max(config.min_learning_rate, config.learning_rate * config.lr_final_fraction)
         base_schedule = optax.warmup_cosine_decay_schedule(
             init_value=config.min_learning_rate,
             peak_value=config.learning_rate,
             warmup_steps=warmup_steps,
             decay_steps=decay_steps,
-            end_value=config.min_learning_rate,
+            end_value=end_value,
         )
         learning_rate = base_schedule
 
