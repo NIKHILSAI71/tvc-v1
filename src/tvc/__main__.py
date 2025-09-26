@@ -24,6 +24,7 @@ import datetime as _dt
 import logging
 import re
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Sequence
 
@@ -34,10 +35,28 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="python -m tvc", description="TVC research CLI")
     subparsers = parser.add_subparsers(dest="command", metavar="command")
 
-    train_parser = subparsers.add_parser("train", help="Run the PPO + evolution training loop")
-    train_parser.add_argument("--episodes", type=int, default=10, help="Number of training episodes to run")
-    train_parser.add_argument("--seed", type=int, default=0, help="Seed for the JAX PRNG")
-    train_parser.add_argument("--max-steps", type=int, default=400, help="Maximum environment steps before truncation")
+    train_parser = subparsers.add_parser(
+        "train", 
+        help="Run the PPO + evolution training loop"
+    )
+    train_parser.add_argument(
+        "--episodes", 
+        type=int, 
+        default=10, 
+        help="Number of training episodes to run"
+    )
+    train_parser.add_argument(
+        "--seed", 
+        type=int, 
+        default=0, 
+        help="Seed for the JAX PRNG"
+    )
+    train_parser.add_argument(
+        "--max-steps", 
+        type=int, 
+        default=400, 
+        help="Maximum environment steps before truncation"
+    )
     train_parser.add_argument(
         "--log-level",
         default="INFO",
@@ -62,8 +81,41 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         action="store_true",
         help="Disable the warmup cosine learning-rate schedule",
     )
+    train_parser.add_argument(
+        "--plateau-global-warmup",
+        type=int,
+        default=None,
+        help="Minimum global episodes before plateau LR scaling can trigger",
+    )
+    train_parser.add_argument(
+        "--plateau-warmup",
+        type=int,
+        default=None,
+        help="Stage-local warmup episodes before plateau LR scaling can trigger",
+    )
+    train_parser.add_argument(
+        "--plateau-patience",
+        type=int,
+        default=None,
+        help="Number of consecutive plateau episodes before LR is scaled",
+    )
+    train_parser.add_argument(
+        "--plateau-threshold",
+        type=float,
+        default=None,
+        help="Required improvement (in smoothed return) to reset plateau tracking",
+    )
+    train_parser.add_argument(
+        "--plateau-factor",
+        type=float,
+        default=None,
+        help="Multiplicative factor applied to LR when a plateau is detected",
+    )
 
-    test_parser = subparsers.add_parser("test", help="Execute package smoke tests via pytest")
+    test_parser = subparsers.add_parser(
+        "test", 
+        help="Execute package smoke tests via pytest"
+    )
     test_parser.add_argument(
         "pytest_args",
         nargs=argparse.REMAINDER,
@@ -103,6 +155,11 @@ def _run_train(
     output_root: Path,
     run_tag: str | None,
     disable_schedule: bool,
+    plateau_global_warmup: int | None,
+    plateau_warmup: int | None,
+    plateau_patience: int | None,
+    plateau_threshold: float | None,
+    plateau_factor: float | None,
 ) -> None:
     timestamp = _dt.datetime.now().strftime("run-%Y-%m-%d-%I-%M%p")
     run_name = _sanitise_tag(run_tag) if run_tag else timestamp
@@ -130,6 +187,19 @@ def _run_train(
     key = jax.random.key(seed)
     env = Tvc2DEnv(max_steps=max_steps)
     config = PpoEvolutionConfig(use_lr_schedule=not disable_schedule)
+    overrides = {}
+    if plateau_global_warmup is not None:
+        overrides["plateau_global_warmup_episodes"] = max(0, plateau_global_warmup)
+    if plateau_warmup is not None:
+        overrides["plateau_warmup_episodes"] = max(0, plateau_warmup)
+    if plateau_patience is not None:
+        overrides["plateau_patience"] = max(1, plateau_patience)
+    if plateau_threshold is not None:
+        overrides["plateau_threshold"] = float(plateau_threshold)
+    if plateau_factor is not None:
+        overrides["plateau_factor"] = float(plateau_factor)
+    if overrides:
+        config = replace(config, **overrides)
     state = train_controller(env, total_episodes=episodes, rng=key, config=config, output_dir=run_dir)
 
     logger.info(
@@ -158,6 +228,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_root=args.output_root,
             run_tag=args.run_tag,
             disable_schedule=args.no_lr_schedule,
+            plateau_global_warmup=args.plateau_global_warmup,
+            plateau_warmup=args.plateau_warmup,
+            plateau_patience=args.plateau_patience,
+            plateau_threshold=args.plateau_threshold,
+            plateau_factor=args.plateau_factor,
         )
         return 0
     if args.command == "test":
