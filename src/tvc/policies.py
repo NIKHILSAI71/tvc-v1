@@ -48,9 +48,12 @@ class PolicyConfig:
 
     hidden_dims: Tuple[int, ...] = (512, 512, 256, 128)
     activation: Callable[[jnp.ndarray], jnp.ndarray] = nn.silu
-    log_std_init: float = -0.3
-    dropout_rate: float = 0.05
+    log_std_init: float = -2.0
+    log_std_min: float = -4.0
+    log_std_max: float = -1.2
+    dropout_rate: float = 0.0
     use_layer_norm: bool = True
+    action_limit: float = 0.28
 
 
 class ActorCritic(nn.Module):
@@ -68,9 +71,17 @@ class ActorCritic(nn.Module):
             x = self.config.activation(x)
             if self.config.dropout_rate > 0.0:
                 x = nn.Dropout(rate=self.config.dropout_rate, name=f"mlp_{idx}_dropout")(x, deterministic=deterministic)
-        mean = nn.Dense(2, name="policy_head")(x)
+        mean_raw = nn.Dense(2, name="policy_head")(x)
+        mean = jnp.tanh(mean_raw) * self.config.action_limit
         value = nn.Dense(1, name="value_head")(x)
-        log_std = self.param("log_std", lambda k: jnp.full((2,), self.config.log_std_init))
+        log_std_bias = nn.initializers.constant(self.config.log_std_init)
+        log_std_head = nn.Dense(
+            2,
+            name="log_std_head",
+            kernel_init=nn.initializers.zeros,
+            bias_init=log_std_bias,
+        )(x)
+        log_std = jnp.clip(log_std_head, self.config.log_std_min, self.config.log_std_max)
         return mean, log_std, value.squeeze(-1)
 
 
