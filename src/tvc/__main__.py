@@ -170,6 +170,53 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         default=None,
         help="Multiplicative factor applied to LR when a plateau is detected",
     )
+    train_parser.add_argument(
+        "--enable-evolution",
+        action="store_true",
+        help="Enable mutation-based elite search after PPO updates",
+    )
+    train_parser.add_argument(
+        "--evolution-population",
+        type=int,
+        default=None,
+        help="Population size to use when evolution is enabled",
+    )
+    train_parser.add_argument(
+        "--evolution-elite-keep",
+        type=int,
+        default=None,
+        help="Number of elites retained each evolution round",
+    )
+    train_parser.add_argument(
+        "--evolution-mutation-scale",
+        type=float,
+        default=None,
+        help="Gaussian mutation scale applied during evolutionary rollout",
+    )
+    train_parser.add_argument(
+        "--evolution-adoption-margin",
+        type=float,
+        default=None,
+        help="Minimum reward improvement required before adopting an evolved policy",
+    )
+    train_parser.add_argument(
+        "--policy-eval-interval",
+        type=int,
+        default=None,
+        help="Episodes between policy-only evaluation sweeps (default: disabled)",
+    )
+    train_parser.add_argument(
+        "--policy-eval-episodes",
+        type=int,
+        default=None,
+        help="Number of episodes to average during evaluation runs",
+    )
+    train_parser.add_argument(
+        "--policy-eval-max-steps",
+        type=int,
+        default=None,
+        help="Maximum steps per evaluation episode",
+    )
 
     test_parser = subparsers.add_parser(
         "test",
@@ -229,6 +276,14 @@ def _run_train(
     plateau_patience: int | None,
     plateau_threshold: float | None,
     plateau_factor: float | None,
+    enable_evolution: bool,
+    evolution_population: int | None,
+    evolution_elite_keep: int | None,
+    evolution_mutation_scale: float | None,
+    evolution_adoption_margin: float | None,
+    policy_eval_interval: int | None,
+    policy_eval_episodes: int | None,
+    policy_eval_max_steps: int | None,
 ) -> None:
     timestamp = _dt.datetime.now().strftime("run-%Y-%m-%d-%I-%M%p")
     run_name = _sanitise_tag(run_tag) if run_tag else timestamp
@@ -279,6 +334,21 @@ def _run_train(
         overrides["action_blend_transition_episodes"] = max(1, int(blend_transition_episodes))
     if disable_progressive_blend:
         overrides["progressive_action_blend"] = False
+    overrides["use_evolution"] = enable_evolution
+    if evolution_population is not None:
+        overrides["population_size"] = max(0, evolution_population)
+    if evolution_elite_keep is not None:
+        overrides["elite_keep"] = max(0, evolution_elite_keep)
+    if evolution_mutation_scale is not None:
+        overrides["mutation_scale"] = float(abs(evolution_mutation_scale))
+    if evolution_adoption_margin is not None:
+        overrides["evolution_adoption_margin"] = float(evolution_adoption_margin)
+    if policy_eval_interval is not None:
+        overrides["policy_eval_interval"] = max(0, policy_eval_interval)
+    if policy_eval_episodes is not None:
+        overrides["policy_eval_episodes"] = max(1, policy_eval_episodes)
+    if policy_eval_max_steps is not None:
+        overrides["policy_eval_max_steps"] = max(1, policy_eval_max_steps)
     if overrides:
         config = replace(config, **overrides)
     logger.info(
@@ -339,6 +409,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             plateau_patience=args.plateau_patience,
             plateau_threshold=args.plateau_threshold,
             plateau_factor=args.plateau_factor,
+            enable_evolution=args.enable_evolution,
+            evolution_population=args.evolution_population,
+            evolution_elite_keep=args.evolution_elite_keep,
+            evolution_mutation_scale=args.evolution_mutation_scale,
+            evolution_adoption_margin=args.evolution_adoption_margin,
+            policy_eval_interval=args.policy_eval_interval,
+            policy_eval_episodes=args.policy_eval_episodes,
+            policy_eval_max_steps=args.policy_eval_max_steps,
         )
         return 0
     if args.command == "test":
