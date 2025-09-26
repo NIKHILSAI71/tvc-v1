@@ -54,7 +54,7 @@ class Tvc2DEnv:
         self,
         model_path: str | None = None,
         dt: float = 0.02,
-        ctrl_limit: float = 0.3,
+        ctrl_limit: float = 0.28,
         max_steps: int = 2000,
         seed: int | None = None,
     ) -> None:
