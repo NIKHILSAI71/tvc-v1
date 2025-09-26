@@ -216,7 +216,18 @@ class Tvc2DEnv:
         penalty = 4.0 * pitch**2 + 0.5 * pitch_rate**2 + 0.3 * lateral**2 + 0.1 * lateral_vel**2
         penalty += 0.25 * altitude_error**2 + 0.12 * vertical_vel**2
         penalty += 0.05 * jerk + 0.02 * ctrl_smooth
-        reward = float(-penalty)
+
+        altitude_bonus = float(0.02 * np.clip(4.0 - abs(altitude_error), 0.0, 4.0))
+        action_smooth_penalty = float(0.0015 * np.linalg.norm(self.data.ctrl[1:3]))
+
+        stability_bonus = 0.0
+        if abs(pitch) < 0.12 and abs(lateral) < 0.6:
+            stability_bonus += 0.08
+            if abs(pitch_rate) < 0.25 and abs(lateral_vel) < 0.5:
+                stability_bonus += 0.04
+
+        shaping = stability_bonus + altitude_bonus - action_smooth_penalty
+        reward = float(-penalty + shaping)
         return reward, {
             "pitch_error": pitch,
             "pitch_rate": pitch_rate,
@@ -225,6 +236,11 @@ class Tvc2DEnv:
             "altitude_error": altitude_error,
             "vertical_velocity": vertical_vel,
             "jerk": jerk,
+            "reward_penalty": penalty,
+            "stability_bonus": stability_bonus,
+            "altitude_bonus": altitude_bonus,
+            "ctrl_l2_penalty": action_smooth_penalty,
+            "reward_shaping": shaping,
         }
 
 
