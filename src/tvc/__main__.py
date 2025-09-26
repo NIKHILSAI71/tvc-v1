@@ -36,26 +36,26 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     subparsers = parser.add_subparsers(dest="command", metavar="command")
 
     train_parser = subparsers.add_parser(
-        "train", 
-        help="Run the PPO + evolution training loop"
+        "train",
+        help="Run the PPO + evolution training loop",
     )
     train_parser.add_argument(
-        "--episodes", 
-        type=int, 
-        default=10, 
-        help="Number of training episodes to run"
+    "--episodes",
+    type=int,
+    default=10,
+    help="Number of training episodes to run",
     )
     train_parser.add_argument(
-        "--seed", 
-        type=int, 
-        default=0, 
-        help="Seed for the JAX PRNG"
+    "--seed",
+    type=int,
+    default=0,
+    help="Seed for the JAX PRNG",
     )
     train_parser.add_argument(
-        "--max-steps", 
-        type=int, 
-        default=400, 
-        help="Maximum environment steps before truncation"
+    "--max-steps",
+    type=int,
+    default=400,
+    help="Maximum environment steps before truncation",
     )
     train_parser.add_argument(
         "--log-level",
@@ -80,6 +80,65 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         "--no-lr-schedule",
         action="store_true",
         help="Disable the warmup cosine learning-rate schedule",
+    )
+    train_parser.add_argument(
+        "--learning-rate",
+        type=float,
+        default=None,
+        help="Override the base learning rate used by PPO (default: 3e-4)",
+    )
+    train_parser.add_argument(
+        "--entropy-coef",
+        type=float,
+        default=None,
+        help="Override the entropy regularisation coefficient (default: 5e-3)",
+    )
+    train_parser.add_argument(
+        "--reward-scale",
+        type=float,
+        default=None,
+        help="Multiply raw rewards by this factor before optimisation (default: 1.0)",
+    )
+    train_parser.add_argument(
+        "--rollout-length",
+        type=int,
+        default=None,
+        help="Number of environment steps per PPO rollout (default: 512)",
+    )
+    train_parser.add_argument(
+        "--policy-weight",
+        type=float,
+        default=None,
+        help="Target policy contribution to the blended action (default: 0.75)",
+    )
+    train_parser.add_argument(
+        "--mpc-weight",
+        type=float,
+        default=None,
+        help="Target MPC contribution to the blended action (default: 0.25)",
+    )
+    train_parser.add_argument(
+        "--policy-warmup-weight",
+        type=float,
+        default=None,
+        help="Initial policy weight when progressive blending is enabled (default: 0.3)",
+    )
+    train_parser.add_argument(
+        "--mpc-warmup-weight",
+        type=float,
+        default=None,
+        help="Initial MPC weight when progressive blending is enabled (default: 0.7)",
+    )
+    train_parser.add_argument(
+        "--blend-transition-episodes",
+        type=int,
+        default=None,
+        help="Episodes per stage to transition from warmup to target blend weights (default: 300)",
+    )
+    train_parser.add_argument(
+        "--no-progressive-blend",
+        action="store_true",
+        help="Keep MPC/policy weights fixed instead of interpolating over the stage",
     )
     train_parser.add_argument(
         "--plateau-global-warmup",
@@ -113,8 +172,8 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     )
 
     test_parser = subparsers.add_parser(
-        "test", 
-        help="Execute package smoke tests via pytest"
+        "test",
+        help="Execute package smoke tests via pytest",
     )
     test_parser.add_argument(
         "pytest_args",
@@ -155,6 +214,16 @@ def _run_train(
     output_root: Path,
     run_tag: str | None,
     disable_schedule: bool,
+    learning_rate: float | None,
+    entropy_coef: float | None,
+    reward_scale: float | None,
+    rollout_length: int | None,
+    policy_weight: float | None,
+    mpc_weight: float | None,
+    policy_warmup_weight: float | None,
+    mpc_warmup_weight: float | None,
+    blend_transition_episodes: int | None,
+    disable_progressive_blend: bool,
     plateau_global_warmup: int | None,
     plateau_warmup: int | None,
     plateau_patience: int | None,
@@ -176,14 +245,6 @@ def _run_train(
     from .env import Tvc2DEnv
     from .training import PpoEvolutionConfig, train_controller
 
-    logger.info(
-        "Training started: episodes=%s, seed=%s, max_steps=%s, log_level=%s, output_dir=%s",
-        episodes,
-        seed,
-        max_steps,
-        log_level,
-        run_dir,
-    )
     key = jax.random.key(seed)
     env = Tvc2DEnv(max_steps=max_steps)
     config = PpoEvolutionConfig(use_lr_schedule=not disable_schedule)
@@ -198,8 +259,43 @@ def _run_train(
         overrides["plateau_threshold"] = float(plateau_threshold)
     if plateau_factor is not None:
         overrides["plateau_factor"] = float(plateau_factor)
+    if learning_rate is not None:
+        overrides["learning_rate"] = float(learning_rate)
+    if entropy_coef is not None:
+        overrides["entropy_coef"] = float(entropy_coef)
+    if reward_scale is not None:
+        overrides["reward_scale"] = float(reward_scale)
+    if rollout_length is not None:
+        overrides["rollout_length"] = max(1, int(rollout_length))
+    if policy_weight is not None:
+        overrides["policy_action_weight"] = float(policy_weight)
+    if mpc_weight is not None:
+        overrides["mpc_action_weight"] = float(mpc_weight)
+    if policy_warmup_weight is not None:
+        overrides["policy_action_weight_warmup"] = float(policy_warmup_weight)
+    if mpc_warmup_weight is not None:
+        overrides["mpc_action_weight_warmup"] = float(mpc_warmup_weight)
+    if blend_transition_episodes is not None:
+        overrides["action_blend_transition_episodes"] = max(1, int(blend_transition_episodes))
+    if disable_progressive_blend:
+        overrides["progressive_action_blend"] = False
     if overrides:
         config = replace(config, **overrides)
+    logger.info(
+        (
+            "Training started | episodes=%s seed=%s max_steps=%s lr=%.3g entropy_coef=%.3g "
+            "reward_scale=%.3g rollout_length=%s progressive_blend=%s output_dir=%s"
+        ),
+        episodes,
+        seed,
+        max_steps,
+        config.learning_rate,
+        config.entropy_coef,
+        config.reward_scale,
+        config.rollout_length,
+        config.progressive_action_blend,
+        run_dir,
+    )
     state = train_controller(env, total_episodes=episodes, rng=key, config=config, output_dir=run_dir)
 
     logger.info(
@@ -228,6 +324,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_root=args.output_root,
             run_tag=args.run_tag,
             disable_schedule=args.no_lr_schedule,
+            learning_rate=args.learning_rate,
+            entropy_coef=args.entropy_coef,
+            reward_scale=args.reward_scale,
+            rollout_length=args.rollout_length,
+            policy_weight=args.policy_weight,
+            mpc_weight=args.mpc_weight,
+            policy_warmup_weight=args.policy_warmup_weight,
+            mpc_warmup_weight=args.mpc_warmup_weight,
+            blend_transition_episodes=args.blend_transition_episodes,
+            disable_progressive_blend=args.no_progressive_blend,
             plateau_global_warmup=args.plateau_global_warmup,
             plateau_warmup=args.plateau_warmup,
             plateau_patience=args.plateau_patience,
