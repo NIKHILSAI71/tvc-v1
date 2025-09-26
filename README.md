@@ -7,7 +7,7 @@ that combines:
 - a differentiable JAX dynamics model used by a gradient-based MPC solver,
 - a PPO actor-critic implemented with Flax and Optax,
 - evolutionary perturbations with curriculum learning to generalise across
-  deployment scenarios.
+   deployment scenarios (now opt-in to keep the default loop lightweight).
 
 The controller outputs two lateral offsets $(x, y)$ positioning the engine
 carriage beneath the rocket, mirroring real-world TVC hardware. The MPC module
@@ -104,6 +104,8 @@ The training stack now includes stability-oriented defaults:
 - Reward shaping bonuses for low pitch and lateral error, plus explicit control smoothness penalties.
 - Progressive MPC-to-policy action blending (70→20% MPC) over the first ~300 stage episodes.
 - PPO hyperparameters tuned for negative-reward regimes (`reward_scale=1.0`, `clip ε=0.15`, `rollout_length=512`, `entropy_coef=5e-3`).
+- Evolutionary elitism is disabled by default; re-enable it with `--enable-evolution` plus the accompanying knobs when you need population-based exploration.
+- Policy-only evaluation sweeps are also off by default—pass `--policy-eval-interval` to collect periodic validation scores.
 - A deeper policy network (512-512-256-128) with lower dropout and conservative log-std initialisation.
 
 #### CLI overrides
