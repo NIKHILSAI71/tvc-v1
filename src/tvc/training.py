@@ -94,18 +94,20 @@ class PpoEvolutionConfig:
     curriculum_adaptation: bool = True
     curriculum_reward_smoothing: float = 0.25
     reward_scale: float = 1.0
-    policy_action_weight: float = 0.9
-    mpc_action_weight: float = 0.1
-    policy_action_weight_warmup: float = 0.6
-    mpc_action_weight_warmup: float = 0.4
+    policy_action_weight: float = 0.85
+    mpc_action_weight: float = 0.15
+    policy_action_weight_warmup: float = 0.3
+    mpc_action_weight_warmup: float = 0.7
     action_blend_transition_episodes: int = 120
     progressive_action_blend: bool = True
     plateau_warmup_episodes: int = 40
     plateau_min_scale: float = 0.2
-    mpc_loss_backoff_threshold: float = 1600.0
-    mpc_loss_backoff_slope: float = 4.0
-    mpc_loss_ema_decay: float = 0.5
-    mpc_min_weight: float = 0.02
+    mpc_loss_backoff_threshold: float = 3800.0
+    mpc_loss_backoff_slope: float = 2.0
+    mpc_loss_ema_decay: float = 0.45
+    mpc_min_weight: float = 0.12
+    mpc_backoff_warmup_episodes: int = 45
+    mpc_backoff_reward_gate: float = 0.05
     adaptive_lr_cooldown_episodes: int = 3
     mpc_bc_enabled: bool = False
     mpc_bc_steps: int = 0
@@ -413,6 +415,14 @@ def _apply_mpc_loss_backoff(
     threshold = float(config.mpc_loss_backoff_threshold)
     if not math.isfinite(threshold) or threshold <= 0.0:
         return policy_weight, mpc_weight
+    warmup_limit = max(int(getattr(config, "mpc_backoff_warmup_episodes", 0)), 0)
+    if getattr(state, "stage_episode", 0) < warmup_limit:
+        return policy_weight, mpc_weight
+    reward_gate = getattr(config, "mpc_backoff_reward_gate", None)
+    if reward_gate is not None and math.isfinite(reward_gate):
+        stage_reward = getattr(state, "stage_reward_ema", float("nan"))
+        if not math.isfinite(stage_reward) or stage_reward < reward_gate:
+            return policy_weight, mpc_weight
     loss_ema = getattr(state, "mpc_loss_ema", float("nan"))
     if not math.isfinite(loss_ema) or loss_ema <= threshold:
         return policy_weight, mpc_weight
@@ -426,8 +436,9 @@ def _apply_mpc_loss_backoff(
     scale = math.exp(-slope * excess_ratio)
     scaled_mpc_share = mpc_share * scale
 
-    min_share = float(np.clip(config.mpc_min_weight, 0.0, 0.95))
-    scaled_mpc_share = float(np.clip(scaled_mpc_share, min_share, 0.95))
+    min_share = float(np.clip(config.mpc_min_weight, 0.0, 0.9))
+    max_share = float(np.clip(1.0 - max(1e-3, min_share * 0.25), 0.1, 0.98))
+    scaled_mpc_share = float(np.clip(scaled_mpc_share, min_share, max_share))
     scaled_policy_share = float(max(1e-6, 1.0 - scaled_mpc_share))
 
     total = scaled_policy_share + scaled_mpc_share
