@@ -15,16 +15,16 @@ from .dynamics import RocketParams, simulate_rollout
 class MpcConfig:
     """Configuration bundle for the MPC optimisation routine."""
 
-    horizon: int = 36
-    dt: float = 0.05
-    iterations: int = 60
-    learning_rate: float = 0.06
+    horizon: int = 14
+    dt: float = 0.04
+    iterations: int = 48
+    learning_rate: float = 0.05
     control_limit: float = 0.28
     position_weight: float = 25.0
     attitude_weight: float = 60.0
     velocity_weight: float = 8.0
-    control_weight: float = 1.0
-    terminal_weight: float = 4.0
+    control_weight: float = 2.0
+    terminal_weight: float = 6.0
     tolerance: float = 1e-3
     grad_clip: float | None = 1.5
 
