@@ -109,31 +109,31 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         "--policy-weight",
         type=float,
         default=None,
-        help="Target policy contribution to the blended action (default: 0.75)",
+        help="Target policy contribution to the blended action (default: 0.8)",
     )
     train_parser.add_argument(
         "--mpc-weight",
         type=float,
         default=None,
-        help="Target MPC contribution to the blended action (default: 0.25)",
+        help="Target MPC contribution to the blended action (default: 0.2)",
     )
     train_parser.add_argument(
         "--policy-warmup-weight",
         type=float,
         default=None,
-        help="Initial policy weight when progressive blending is enabled (default: 0.3)",
+        help="Initial policy weight when progressive blending is enabled (default: 0.1)",
     )
     train_parser.add_argument(
         "--mpc-warmup-weight",
         type=float,
         default=None,
-        help="Initial MPC weight when progressive blending is enabled (default: 0.7)",
+        help="Initial MPC weight when progressive blending is enabled (default: 0.9)",
     )
     train_parser.add_argument(
         "--blend-transition-episodes",
         type=int,
         default=None,
-        help="Episodes per stage to transition from warmup to target blend weights (default: 300)",
+        help="Episodes per stage to transition from warmup to target blend weights (default: 120)",
     )
     train_parser.add_argument(
         "--no-progressive-blend",
