@@ -103,8 +103,8 @@ class PpoEvolutionConfig:
     mpc_loss_ema_decay: float = 0.5
     mpc_min_weight: float = 0.02
     adaptive_lr_cooldown_episodes: int = 3
-    mpc_bc_enabled: bool = True
-    mpc_bc_steps: int = 2048
+    mpc_bc_enabled: bool = False
+    mpc_bc_steps: int = 0
     mpc_bc_batch_size: int = 256
     mpc_bc_epochs: int = 30
     mpc_bc_learning_rate: float = 1e-3
@@ -139,6 +139,7 @@ class TrainingState:
     mpc_loss_ema: float = float("nan")
     lr_adjust_cooldown: int = 0
     lr_adjust_last_direction: int = 0
+    pretraining_metrics: Dict[str, Any] | None = None
 
 
 @dataclass
@@ -533,10 +534,8 @@ def train_controller(
         obs_rms=obs_rms,
         lr_schedule=lr_schedule,
         current_stage_name=curriculum[0].name if curriculum else None,
+        pretraining_metrics=bc_metrics if bc_metrics else None,
     )
-    if bc_metrics:
-        state.history.append({"episode": 0.0, **bc_metrics})
-        state.last_aux.update(bc_metrics)
     if config.adaptive_lr_enabled and curriculum:
         initial_bias = config.stage_lr_bias.get(curriculum[0].name)
         if initial_bias is not None:
@@ -689,7 +688,7 @@ def train_controller(
 
     logger.info("Training loop complete. Elites maintained: %s", len(state.elites))
     if artifacts_dir is not None:
-        save_training_artifacts(state.history, artifacts_dir, config)
+        save_training_artifacts(state.history, artifacts_dir, config, state.pretraining_metrics)
         checkpoint_paths = save_policy_checkpoints(state, artifacts_dir)
         logger.info(
             "Saved policy checkpoints: %s",
@@ -1221,92 +1220,101 @@ def save_training_artifacts(
     history: List[Dict[str, Any]],
     output_dir: Path,
     config: PpoEvolutionConfig,
+    pretraining_metrics: Dict[str, Any] | None = None,
 ) -> None:
-    """Persists per-episode metrics and diagnostic plots to ``output_dir``."""
+    """Persists per-episode and optional pretraining metrics to ``output_dir``."""
 
-    if not history:
+    if not history and pretraining_metrics is None:
         return
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    metrics_csv = output_dir / "metrics.csv"
-    metrics_json = output_dir / "metrics.json"
-    field_names = sorted({key for entry in history for key in entry.keys()})
 
-    with metrics_csv.open("w", newline="", encoding="utf-8") as csv_file:
-        writer = csv.DictWriter(csv_file, fieldnames=field_names)
-        writer.writeheader()
-        for row in history:
-            writer.writerow(row)
+    if history:
+        metrics_csv = output_dir / "metrics.csv"
+        metrics_json = output_dir / "metrics.json"
+        field_names = sorted({key for entry in history for key in entry.keys()})
 
-    with metrics_json.open("w", encoding="utf-8") as json_file:
-        json.dump(history, json_file, indent=2)
+        with metrics_csv.open("w", newline="", encoding="utf-8") as csv_file:
+            writer = csv.DictWriter(csv_file, fieldnames=field_names)
+            writer.writeheader()
+            for row in history:
+                writer.writerow(row)
+
+        with metrics_json.open("w", encoding="utf-8") as json_file:
+            json.dump(history, json_file, indent=2)
+
+        try:
+            import matplotlib
+
+            matplotlib.use("Agg", force=True)
+            import matplotlib.pyplot as plt
+        except ImportError as exc:  # pragma: no cover - optional dependency
+            logging.getLogger("tvc.training").warning("matplotlib unavailable, skipping plots: %s", exc)
+        else:
+            episodes = [entry.get("episode", idx + 1) for idx, entry in enumerate(history)]
+
+            fig, axes = plt.subplots(2, 2, figsize=(13, 10), sharex="col")
+            ax_rewards, ax_reward_mean = axes[0]
+            ax_env, ax_lr = axes[1]
+
+            def _plot_if_available(axis, key: str, label: str, entries: List[Dict[str, Any]]):
+                values = [entry.get(key) for entry in entries]
+                if any(value is None for value in values):
+                    return
+                axis.plot(episodes, values, label=label)
+
+            _plot_if_available(ax_rewards, "rollout_return", "Rollout return", history)
+            _plot_if_available(ax_rewards, "elite_best", "Elite best", history)
+            _plot_if_available(ax_rewards, "elite_mean", "Elite mean", history)
+            ax_rewards.set_title("Episode returns")
+            ax_rewards.set_ylabel("Reward")
+            ax_rewards.grid(True, linestyle="--", alpha=0.3)
+            ax_rewards.legend()
+
+            _plot_if_available(ax_reward_mean, "reward_mean", "Reward mean", history)
+            ax_reward_mean.set_title("Average reward per step")
+            ax_reward_mean.set_ylabel("Reward")
+            ax_reward_mean.grid(True, linestyle="--", alpha=0.3)
+
+            env_metrics = [
+                ("pitch_error_abs_mean", "|pitch error|"),
+                ("pitch_rate_abs_mean", "|pitch rate|"),
+                ("lateral_abs_mean", "|lateral|"),
+                ("lateral_vel_abs_mean", "|lateral velocity|"),
+            ]
+            for key, label in env_metrics:
+                _plot_if_available(ax_env, key, label, history)
+            ax_env.set_title("Rocket stability diagnostics")
+            ax_env.set_xlabel("Episode")
+            ax_env.set_ylabel("Mean absolute value")
+            ax_env.grid(True, linestyle="--", alpha=0.3)
+            if ax_env.get_legend_handles_labels()[0]:
+                ax_env.legend()
+
+            if any("learning_rate" in entry for entry in history):
+                _plot_if_available(ax_lr, "learning_rate", "Learning rate", history)
+                ax_lr.set_ylabel("LR")
+            else:
+                ax_lr.text(0.5, 0.5, "Learning rate schedule disabled", ha="center", va="center")
+            ax_lr.set_title("Optimizer schedule")
+            ax_lr.set_xlabel("Episode")
+            ax_lr.grid(True, linestyle="--", alpha=0.3)
+
+            fig.tight_layout()
+            plot_path = output_dir / "metrics.png"
+            fig.savefig(str(plot_path), dpi=200)
+            plt.close(fig)
 
     config_path = output_dir / "config.json"
     with config_path.open("w", encoding="utf-8") as config_file:
         json.dump(_config_to_serialisable(config), config_file, indent=2)
 
-    try:
-        import matplotlib
-
-        matplotlib.use("Agg", force=True)
-        import matplotlib.pyplot as plt
-    except ImportError as exc:  # pragma: no cover - optional dependency
-        logging.getLogger("tvc.training").warning("matplotlib unavailable, skipping plots: %s", exc)
-        return
-
-    episodes = [entry.get("episode", idx + 1) for idx, entry in enumerate(history)]
-
-    fig, axes = plt.subplots(2, 2, figsize=(13, 10), sharex="col")
-    ax_rewards, ax_reward_mean = axes[0]
-    ax_env, ax_lr = axes[1]
-
-    def _plot_if_available(axis, key: str, label: str, entries: List[Dict[str, Any]]):
-        values = [entry.get(key) for entry in entries]
-        if any(value is None for value in values):
-            return
-        axis.plot(episodes, values, label=label)
-
-    _plot_if_available(ax_rewards, "rollout_return", "Rollout return", history)
-    _plot_if_available(ax_rewards, "elite_best", "Elite best", history)
-    _plot_if_available(ax_rewards, "elite_mean", "Elite mean", history)
-    ax_rewards.set_title("Episode returns")
-    ax_rewards.set_ylabel("Reward")
-    ax_rewards.grid(True, linestyle="--", alpha=0.3)
-    ax_rewards.legend()
-
-    _plot_if_available(ax_reward_mean, "reward_mean", "Reward mean", history)
-    ax_reward_mean.set_title("Average reward per step")
-    ax_reward_mean.set_ylabel("Reward")
-    ax_reward_mean.grid(True, linestyle="--", alpha=0.3)
-
-    env_metrics = [
-        ("pitch_error_abs_mean", "|pitch error|"),
-        ("pitch_rate_abs_mean", "|pitch rate|"),
-        ("lateral_abs_mean", "|lateral|"),
-        ("lateral_vel_abs_mean", "|lateral velocity|"),
-    ]
-    for key, label in env_metrics:
-        _plot_if_available(ax_env, key, label, history)
-    ax_env.set_title("Rocket stability diagnostics")
-    ax_env.set_xlabel("Episode")
-    ax_env.set_ylabel("Mean absolute value")
-    ax_env.grid(True, linestyle="--", alpha=0.3)
-    if ax_env.get_legend_handles_labels()[0]:
-        ax_env.legend()
-
-    if any("learning_rate" in entry for entry in history):
-        _plot_if_available(ax_lr, "learning_rate", "Learning rate", history)
-        ax_lr.set_ylabel("LR")
-    else:
-        ax_lr.text(0.5, 0.5, "Learning rate schedule disabled", ha="center", va="center")
-    ax_lr.set_title("Optimizer schedule")
-    ax_lr.set_xlabel("Episode")
-    ax_lr.grid(True, linestyle="--", alpha=0.3)
-
-    fig.tight_layout()
-    plot_path = output_dir / "metrics.png"
-    fig.savefig(str(plot_path), dpi=200)
-    plt.close(fig)
+    if pretraining_metrics:
+        pretraining_path = output_dir / "pretraining_metrics.json"
+        pretraining_path.write_text(
+            json.dumps(_ensure_json_serialisable(pretraining_metrics), indent=2),
+            encoding="utf-8",
+        )
 
 
 def _ensure_json_serialisable(value: Any) -> Any:
@@ -1354,6 +1362,8 @@ def save_policy_checkpoints(state: TrainingState, output_dir: Path) -> Dict[str,
     }
     if best_episode is not None:
         metadata["best_episode"] = best_episode
+    if state.pretraining_metrics:
+        metadata["pretraining_metrics"] = _ensure_json_serialisable(state.pretraining_metrics)
 
     metadata_path = output_dir / "policy_metadata.json"
     metadata_path.write_text(json.dumps(_ensure_json_serialisable(metadata), indent=2), encoding="utf-8")
