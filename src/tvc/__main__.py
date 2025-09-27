@@ -218,6 +218,35 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="Maximum steps per evaluation episode",
     )
     train_parser.add_argument(
+        "--record-video",
+        action="store_true",
+        help="Record a post-training evaluation rollout to MP4 (also on interruption)",
+    )
+    train_parser.add_argument(
+        "--video-length",
+        type=int,
+        default=1500,
+        help="Maximum number of frames to capture in the evaluation video",
+    )
+    train_parser.add_argument(
+        "--video-width",
+        type=int,
+        default=640,
+        help="Pixel width of the recorded evaluation video",
+    )
+    train_parser.add_argument(
+        "--video-height",
+        type=int,
+        default=360,
+        help="Pixel height of the recorded evaluation video",
+    )
+    train_parser.add_argument(
+        "--video-stage",
+        type=str,
+        default=None,
+        help="Optional curriculum stage name to use for the recorded video",
+    )
+    train_parser.add_argument(
         "--disable-mpc-bc",
         action="store_true",
         help="Skip the MPC behaviour-cloning warmup before PPO",
@@ -325,6 +354,11 @@ def _run_train(
     policy_eval_interval: int | None,
     policy_eval_episodes: int | None,
     policy_eval_max_steps: int | None,
+    record_video: bool,
+    video_length: int,
+    video_width: int,
+    video_height: int,
+    video_stage: str | None,
     disable_mpc_bc: bool,
     mpc_bc_steps: int | None,
     mpc_bc_epochs: int | None,
@@ -346,7 +380,7 @@ def _run_train(
     import jax
 
     from .env import Tvc2DEnv
-    from .training import PpoEvolutionConfig, train_controller
+    from .training import PpoEvolutionConfig, VideoRecordingConfig, train_controller
 
     key = jax.random.key(seed)
     env = Tvc2DEnv(max_steps=max_steps)
@@ -413,10 +447,18 @@ def _run_train(
         overrides["mpc_bc_stage_name"] = str(mpc_bc_stage)
     if overrides:
         config = replace(config, **overrides)
+
+    video_config = VideoRecordingConfig(
+        enabled=record_video,
+        video_length=max(1, int(video_length)),
+        width=max(16, int(video_width)),
+        height=max(16, int(video_height)),
+        stage_name=video_stage,
+    )
     logger.info(
         (
             "Training started | episodes=%s seed=%s max_steps=%s lr=%.3g entropy_coef=%.3g "
-            "reward_scale=%.3g rollout_length=%s progressive_blend=%s output_dir=%s"
+            "reward_scale=%.3g rollout_length=%s progressive_blend=%s output_dir=%s record_video=%s"
         ),
         episodes,
         seed,
@@ -427,8 +469,16 @@ def _run_train(
         config.rollout_length,
         config.progressive_action_blend,
         run_dir,
+        video_config.enabled,
     )
-    state = train_controller(env, total_episodes=episodes, rng=key, config=config, output_dir=run_dir)
+    state = train_controller(
+        env,
+        total_episodes=episodes,
+        rng=key,
+        config=config,
+        output_dir=run_dir,
+        video_config=video_config,
+    )
 
     logger.info(
         "Training finished. episodes=%s elites_retained=%s artifacts=%s",
@@ -479,6 +529,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             policy_eval_interval=args.policy_eval_interval,
             policy_eval_episodes=args.policy_eval_episodes,
             policy_eval_max_steps=args.policy_eval_max_steps,
+            record_video=args.record_video,
+            video_length=args.video_length,
+            video_width=args.video_width,
+            video_height=args.video_height,
+            video_stage=args.video_stage,
             disable_mpc_bc=args.disable_mpc_bc,
             mpc_bc_steps=args.mpc_bc_steps,
             mpc_bc_epochs=args.mpc_bc_epochs,
