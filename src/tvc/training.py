@@ -190,6 +190,7 @@ def _build_optimizer(
 
 def _update_normalizer(rms: RunningNormalizer, observation: jnp.ndarray) -> RunningNormalizer:
     obs = jnp.asarray(observation, dtype=jnp.float32)
+    obs = jnp.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
     if rms.mean.size == 0 or rms.mean.shape != obs.shape or rms.count < 1.0:
         return RunningNormalizer(count=1.0, mean=obs, m2=jnp.zeros_like(obs))
     count = rms.count + 1.0
@@ -202,6 +203,7 @@ def _update_normalizer(rms: RunningNormalizer, observation: jnp.ndarray) -> Runn
 
 def _normalize_observation(rms: RunningNormalizer, observation: jnp.ndarray) -> jnp.ndarray:
     obs = jnp.asarray(observation, dtype=jnp.float32)
+    obs = jnp.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
     if rms.mean.size == 0 or rms.mean.shape != obs.shape or rms.count < 1.0:
         return obs
     variance = rms.m2 / rms.count
@@ -742,6 +744,9 @@ def _collect_rollout(
     mpc_iterations: List[float] = []
     mpc_saturation: List[float] = []
     normalised_reward_buffer: List[float] = []
+    policy_action_resets = 0
+    mpc_action_resets = 0
+    blended_action_resets = 0
 
     for step in range(config.rollout_length):
         state.rng, policy_key, dropout_key = jax.random.split(state.rng, 3)
@@ -755,6 +760,10 @@ def _collect_rollout(
         std = jnp.exp(log_std)
         epsilon = jax.random.normal(policy_key, shape=mean.shape)
         policy_action = mean + std * epsilon
+        if not bool(jnp.all(jnp.isfinite(policy_action))):
+            policy_action_resets += 1
+            policy_action = mean
+        policy_action = jnp.clip(policy_action, -action_limit, action_limit)
         if step % mpc_interval == 0:
             rocket_state = _gather_state(env)
             cached_mpc_action, mpc_diag, cached_plan = compute_tvc_mpc_action(
@@ -768,16 +777,25 @@ def _collect_rollout(
             mpc_grad_norms.append(float(mpc_diag.get("mpc_grad_norm", 0.0)))
             mpc_iterations.append(float(mpc_diag.get("mpc_iterations", config.mpc_config.iterations)))
             mpc_saturation.append(float(mpc_diag.get("mpc_saturation", 0.0)))
+            if not bool(jnp.all(jnp.isfinite(cached_mpc_action))):
+                mpc_action_resets += 1
+                cached_plan = None
+                cached_mpc_action = jnp.zeros_like(cached_mpc_action)
+            cached_mpc_action = jnp.clip(cached_mpc_action, -action_limit, action_limit)
+        else:
+            cached_mpc_action = jnp.clip(cached_mpc_action, -action_limit, action_limit)
         blended_action = policy_weight * policy_action + mpc_weight * cached_mpc_action
-        combined_action = jnp.clip(
-            blended_action,
-            -action_limit,
-            action_limit,
-        )
+        combined_action = jnp.clip(blended_action, -action_limit, action_limit)
 
         log_prob = _gaussian_log_prob(mean, log_std, policy_action)
 
-        result: StepResult = env.step(np.array(combined_action))
+        combined_action_np = np.asarray(combined_action, dtype=np.float32)
+        if not np.isfinite(combined_action_np).all():
+            blended_action_resets += 1
+            fallback_np = np.asarray(np.clip(cached_mpc_action, -action_limit, action_limit), dtype=np.float32)
+            combined_action_np = fallback_np
+            combined_action = jnp.asarray(combined_action_np)
+        result: StepResult = env.step(combined_action_np)
         result_info = result.info
         normalised_reward = float(result_info.get("reward_normalised", result.reward))
         raw_reward = float(result_info.get("raw_reward", normalised_reward))
@@ -888,6 +906,12 @@ def _collect_rollout(
         norm_rewards = jnp.array(normalised_reward_buffer)
         info_metrics["reward_normalised_mean"] = float(jnp.mean(norm_rewards))
         info_metrics["reward_normalised_std"] = float(jnp.std(norm_rewards))
+    if policy_action_resets:
+        info_metrics["policy_action_resets"] = float(policy_action_resets)
+    if mpc_action_resets:
+        info_metrics["mpc_action_resets"] = float(mpc_action_resets)
+    if blended_action_resets:
+        info_metrics["blended_action_resets"] = float(blended_action_resets)
     state.last_mpc_plan = cached_plan
     return batch, info_metrics
 
