@@ -9,18 +9,24 @@ parallel scenarios.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Tuple, TYPE_CHECKING
+from typing import Any, Dict, Tuple, TYPE_CHECKING, TypeAlias, cast
 
 import math
+import os
 
 import mujoco as _mujoco
 import numpy as np
+import gymnasium as gym
+from gymnasium import spaces
 from mujoco import mjx
 
 from .dynamics import RocketParams
 
 if TYPE_CHECKING:  # pragma: no cover - typing aid
     from .curriculum import CurriculumStage
+    from mujoco import Renderer as MujocoRenderer
+else:  # pragma: no cover - runtime alias for typing-only import
+    MujocoRenderer: TypeAlias = Any
 
 mujoco: Any = _mujoco
 
@@ -444,11 +450,110 @@ class Tvc2DEnv:
         return normalised, std
 
 
+class TvcGymnasiumEnv(gym.Env):
+    """Gymnasium-compatible wrapper around :class:`Tvc2DEnv` for video capture.
+
+    The wrapper exposes the MuJoCo environment with an RGB-array render mode so
+    Gymnasium utilities such as :class:`gymnasium.wrappers.RecordVideo` can
+    operate in headless sessions. Rendering is deferred until ``render`` is
+    called to avoid requiring an OpenGL context during regular interaction.
+    """
+
+    metadata = {"render_modes": ["rgb_array"], "render_fps": 50}
+
+    def __init__(
+        self,
+        *,
+        render_mode: str | None = None,
+        width: int = 640,
+        height: int = 360,
+        camera: str | None = None,
+        disturbance_scale: float = 1.0,
+        **env_kwargs: Any,
+    ) -> None:
+        super().__init__()
+        if render_mode not in (None, "rgb_array"):
+            raise ValueError(f"Unsupported render_mode={render_mode!r}; valid option is 'rgb_array'.")
+        self.render_mode = render_mode
+        self.base_env = Tvc2DEnv(**env_kwargs)
+        limit = float(self.base_env.ctrl_limit)
+        self.action_space = spaces.Box(low=-limit, high=limit, shape=(2,), dtype=np.float32)
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(7,), dtype=np.float32)
+        self._width = int(width)
+        self._height = int(height)
+        self._camera = camera
+        self._renderer: MujocoRenderer | None = None
+        self._default_disturbance = float(disturbance_scale)
+
+    def reset(self, *, seed: int | None = None, options: Dict[str, Any] | None = None):  # type: ignore[override]
+        if seed is not None:
+            self.base_env._rng = np.random.default_rng(seed)
+        disturbance = self._default_disturbance
+        if options and "disturbance_scale" in options:
+            disturbance = float(options["disturbance_scale"])
+        observation = self.base_env.reset(disturbance_scale=disturbance)
+        info: Dict[str, Any] = {"disturbance_scale": disturbance}
+        return observation.astype(np.float32), info
+
+    def step(self, action):  # type: ignore[override]
+        np_action = np.asarray(action, dtype=np.float32)
+        result = self.base_env.step(np_action)
+        observation = result.observation.astype(np.float32)
+        reward = float(result.reward)
+        terminated = bool(result.done)
+        truncated = False
+        info = dict(result.info)
+        if "raw_reward" not in info:
+            info["raw_reward"] = reward
+        return observation, reward, terminated, truncated, info
+
+    def render(self):  # type: ignore[override]
+        if self.render_mode != "rgb_array":
+            raise RuntimeError("render_mode must be 'rgb_array' to obtain frames")
+        renderer = self._renderer
+        if renderer is None:
+            renderer = mujoco.Renderer(self.base_env.model, height=self._height, width=self._width)
+            self._renderer = renderer
+        active_renderer = cast(MujocoRenderer, renderer)
+        try:
+            if self._camera is None:
+                active_renderer.update_scene(self.base_env.data)
+            else:
+                active_renderer.update_scene(self.base_env.data, self._camera)
+            return active_renderer.render()
+        except AttributeError:  # pragma: no cover - compatibility path for older mujoco builds
+            if self._camera is None:
+                return active_renderer.render(self.base_env.data)  # type: ignore[call-arg]
+            return active_renderer.render(self.base_env.data, self._camera)  # type: ignore[call-arg]
+
+    def close(self):
+        if self._renderer is not None:
+            self._renderer.close()
+            self._renderer = None
+        super().close()
+
+
 def _default_asset_path() -> str:
     from pathlib import Path
 
-    package_root = Path(__file__).resolve().parents[2]
-    return str(package_root / "assets" / "tvc_2d.xml")
+    env_path = os.environ.get("TVC_ASSET_PATH")
+    if env_path:
+        candidate = Path(env_path)
+        if candidate.is_file():
+            return str(candidate)
+        candidate_file = candidate / "tvc_2d.xml"
+        if candidate_file.is_file():
+            return str(candidate_file)
+
+    origin = Path(__file__).resolve()
+    for base in [origin.parent, *origin.parents]:
+        asset_path = base / "assets" / "tvc_2d.xml"
+        if asset_path.is_file():
+            return str(asset_path)
+
+    raise FileNotFoundError(
+        "Unable to locate tvc_2d.xml. Set TVC_ASSET_PATH to the file or containing directory."
+    )
 
 
 def make_mjx_batch(env: Tvc2DEnv, batch_size: int) -> Tuple[mjx.Model, mjx.Data]:
