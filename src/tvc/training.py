@@ -14,9 +14,10 @@ import csv
 import json
 import logging
 import math
+import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -27,7 +28,7 @@ from flax import serialization
 
 from .curriculum import CurriculumStage, build_curriculum
 from .dynamics import RocketParams
-from .env import StepResult, Tvc2DEnv
+from .env import StepResult, Tvc2DEnv, TvcGymnasiumEnv
 from .mpc import MpcConfig, compute_tvc_mpc_action
 from .policies import PolicyConfig, build_policy_network, mutate_parameters
 
@@ -118,6 +119,23 @@ class PpoEvolutionConfig:
     mpc_bc_stage_name: Optional[str] = "pad_hover"
     mpc_bc_log_every: int = 10
     mpc_bc_loss_reg: float = 1e-4
+
+
+@dataclass(frozen=True)
+class VideoRecordingConfig:
+    """Configuration controlling optional evaluation video capture."""
+
+    enabled: bool = False
+    video_folder: str = "videos"
+    video_length: int = 1500
+    name_prefix: str = "tvc-eval"
+    width: int = 640
+    height: int = 360
+    fps: int = 50
+    stage_name: Optional[str] = None
+    deterministic: bool = True
+    disturbance_scale: float = 1.0
+    camera: Optional[str] = None
 
 
 @dataclass
@@ -498,6 +516,7 @@ def train_controller(
     rng: jax.Array,
     config: PpoEvolutionConfig = PpoEvolutionConfig(),
     output_dir: Path | None = None,
+    video_config: VideoRecordingConfig | None = None,
 ) -> TrainingState:
     """Runs PPO with evolutionary refinement and MPC guided actions."""
 
@@ -509,6 +528,7 @@ def train_controller(
     curriculum = build_curriculum()
     initial_stage = curriculum[0] if curriculum else None
     logger = logging.getLogger("tvc.training")
+    video_config = video_config or VideoRecordingConfig()
 
     try:
         if hasattr(env, "apply_rocket_params"):
@@ -578,158 +598,189 @@ def train_controller(
         artifacts_dir = Path(output_dir)
         artifacts_dir.mkdir(parents=True, exist_ok=True)
 
-    for episode in range(total_episodes):
-        stage_idx = min(state.stage_index, len(curriculum) - 1)
-        stage = curriculum[stage_idx]
-        stage_name = stage.name
-        stage_disturbance = float(stage.disturbance_scale)
-        if hasattr(env, "configure_stage"):
-            env.configure_stage(stage)
-        trajectories, rollout_stats = _collect_rollout(env, stage, state, policy_funcs, config)
-        state = _ppo_update(state, trajectories, optimiser, policy_funcs, config)
-        _maybe_update_adaptive_lr(state, config)
-        episode_return = float(jnp.sum(trajectories["rewards"]))
-        reward_mean = float(jnp.mean(trajectories["rewards"]))
-        state, elite_best, elite_mean, evolution_adopted = _evolutionary_update(
-            env,
-            stage,
-            state,
-            policy_funcs,
-            config,
-            optimiser,
-            episode_return,
-        )
+    checkpoint_paths: Dict[str, Path] = {}
+    recorded_videos: List[Path] = []
+    interrupted = False
 
-        if state.lr_schedule is not None and state.lr_schedule_active:
-            base_lr = state.lr_schedule(state.update_step)
-        else:
-            base_lr = config.learning_rate
-        effective_lr = float(base_lr) * state.lr_scale
-        stage, stage_metrics = _update_stage_progress(state, curriculum, stage, episode_return, logger, config)
-
-        evaluation_metrics: Dict[str, Any] = {}
-        if eval_env is not None and config.policy_eval_interval > 0 and (episode + 1) % config.policy_eval_interval == 0:
-            eval_episodes = config.policy_eval_episodes or config.evaluation_episodes
-            eval_max_steps = config.policy_eval_max_steps or config.evaluation_max_steps
-            eval_return = _evaluate_candidate(
-                eval_env,
+    try:
+        for episode in range(total_episodes):
+            stage_idx = min(state.stage_index, len(curriculum) - 1)
+            stage = curriculum[stage_idx]
+            stage_name = stage.name
+            stage_disturbance = float(stage.disturbance_scale)
+            if hasattr(env, "configure_stage"):
+                env.configure_stage(stage)
+            trajectories, rollout_stats = _collect_rollout(env, stage, state, policy_funcs, config)
+            state = _ppo_update(state, trajectories, optimiser, policy_funcs, config)
+            _maybe_update_adaptive_lr(state, config)
+            episode_return = float(jnp.sum(trajectories["rewards"]))
+            reward_mean = float(jnp.mean(trajectories["rewards"]))
+            state, elite_best, elite_mean, evolution_adopted = _evolutionary_update(
+                env,
                 stage,
-                state.params,
+                state,
                 policy_funcs,
                 config,
-                state.obs_rms,
-                episodes=eval_episodes,
-                max_steps=eval_max_steps,
+                optimiser,
+                episode_return,
             )
-            evaluation_metrics["policy_eval_return"] = float(eval_return)
 
-        episode_metrics: Dict[str, Any] = {
-            "episode": float(episode + 1),
-            "stage": stage_name,
-            "disturbance_scale": stage_disturbance,
-            "rollout_return": episode_return,
-            "reward_mean": reward_mean,
-            "elite_best": elite_best,
-            "elite_mean": elite_mean,
-            "elites": float(len(state.elites)),
-            "learning_rate_base": float(base_lr),
-            "learning_rate": effective_lr,
-            "lr_scale": state.lr_scale,
-            "lr_schedule_active": float(bool(state.lr_schedule_active)),
-        }
-        episode_metrics.update(rollout_stats)
-        if state.last_aux:
-            episode_metrics.update(state.last_aux)
-        episode_metrics.update(stage_metrics)
-        episode_metrics.update(evaluation_metrics)
-        if config.use_evolution:
-            episode_metrics["evolution_adopted"] = float(bool(evolution_adopted))
-
-        global_episode = episode + 1
-        state.best_return = max(state.best_return, episode_return)
-        episodes_since_improvement_metric = global_episode - max(state.last_improvement_episode, 0)
-
-        if config.use_plateau_schedule:
-            stage_episode = float(episode_metrics.get("stage_episode", 0.0))
-            smoothed_return = float(state.stage_reward_ema)
-            if math.isfinite(smoothed_return) and smoothed_return > state.best_stage_reward + config.plateau_threshold:
-                state.best_stage_reward = smoothed_return
-                state.plateau_counter = 0
-                state.last_improvement_episode = global_episode
+            if state.lr_schedule is not None and state.lr_schedule_active:
+                base_lr = state.lr_schedule(state.update_step)
             else:
-                warmup_passed = (
-                    stage_episode >= float(config.plateau_warmup_episodes)
-                    and global_episode >= int(config.plateau_global_warmup_episodes)
+                base_lr = config.learning_rate
+            effective_lr = float(base_lr) * state.lr_scale
+            stage, stage_metrics = _update_stage_progress(state, curriculum, stage, episode_return, logger, config)
+
+            evaluation_metrics: Dict[str, Any] = {}
+            if eval_env is not None and config.policy_eval_interval > 0 and (episode + 1) % config.policy_eval_interval == 0:
+                eval_episodes = config.policy_eval_episodes or config.evaluation_episodes
+                eval_max_steps = config.policy_eval_max_steps or config.evaluation_max_steps
+                eval_return = _evaluate_candidate(
+                    eval_env,
+                    stage,
+                    state.params,
+                    policy_funcs,
+                    config,
+                    state.obs_rms,
+                    episodes=eval_episodes,
+                    max_steps=eval_max_steps,
                 )
-                if not warmup_passed:
-                    state.plateau_counter = 0
-                else:
-                    state.plateau_counter += 1
-                    episodes_since_improvement = global_episode - max(state.last_improvement_episode, 0)
-                    if (
-                        state.plateau_counter >= config.plateau_patience
-                        and episodes_since_improvement >= config.plateau_patience
-                    ):
-                        min_floor = max(
-                            config.min_learning_rate / max(config.learning_rate, 1e-12),
-                            config.plateau_min_scale,
-                        )
-                        scaled_scale = max(state.lr_scale * config.plateau_factor, min_floor)
-                        if scaled_scale < state.lr_scale - 1e-9:
-                            state.lr_scale = scaled_scale
-                            logger.info(
-                                "Learning-rate plateau detected (episode %s, stage=%s, ema=%.3f, best_ema=%.3f). Scaling LR to %.6e",
-                                global_episode,
-                                stage_name,
-                                smoothed_return,
-                                state.best_stage_reward,
-                                float(base_lr) * state.lr_scale,
-                            )
-                        state.plateau_counter = 0
+                evaluation_metrics["policy_eval_return"] = float(eval_return)
+
+            episode_metrics: Dict[str, Any] = {
+                "episode": float(episode + 1),
+                "stage": stage_name,
+                "disturbance_scale": stage_disturbance,
+                "rollout_return": episode_return,
+                "reward_mean": reward_mean,
+                "elite_best": elite_best,
+                "elite_mean": elite_mean,
+                "elites": float(len(state.elites)),
+                "learning_rate_base": float(base_lr),
+                "learning_rate": effective_lr,
+                "lr_scale": state.lr_scale,
+                "lr_schedule_active": float(bool(state.lr_schedule_active)),
+            }
+            episode_metrics.update(rollout_stats)
+            if state.last_aux:
+                episode_metrics.update(state.last_aux)
+            episode_metrics.update(stage_metrics)
+            episode_metrics.update(evaluation_metrics)
+            if config.use_evolution:
+                episode_metrics["evolution_adopted"] = float(bool(evolution_adopted))
+
+            global_episode = episode + 1
+            state.best_return = max(state.best_return, episode_return)
             episodes_since_improvement_metric = global_episode - max(state.last_improvement_episode, 0)
-        if config.adaptive_lr_enabled:
-            lower_bound = max(config.adaptive_lr_min_scale, config.plateau_min_scale)
-            state.lr_scale = float(np.clip(state.lr_scale, lower_bound, config.adaptive_lr_max_scale))
-        best_stage_metric = state.best_stage_reward if math.isfinite(state.best_stage_reward) else float("nan")
-        episode_metrics["plateau_counter"] = float(state.plateau_counter)
-        episode_metrics["best_return"] = state.best_return
-        episode_metrics["best_stage_reward"] = best_stage_metric
-        episode_metrics["episodes_since_improvement"] = float(episodes_since_improvement_metric)
-        state.history.append(episode_metrics)
 
-        log_stage_progress = float(episode_metrics.get("action_blend_progress", float("nan")))
-        raw_reward_mean = float(episode_metrics.get("reward_raw_mean", float("nan")))
-        entropy_metric = float(episode_metrics.get("entropy", float("nan")))
-        mpc_loss_metric = float(episode_metrics.get("mpc_loss_mean", float("nan")))
-        logger.info(
-            (
-                "Episode %s/%s | stage=%s (disturbance=%.2f, progress=%.2f) | "
-                "return=%.3f | reward_mean=%.3f (raw=%.3f) | elite_best=%.3f | "
-                "lr=%.3e | entropy=%.3f | mpc_loss=%.3f | elites=%s"
-            ),
-            episode + 1,
-            total_episodes,
-            stage_name,
-            stage_disturbance,
-            log_stage_progress,
-            episode_return,
-            reward_mean,
-            raw_reward_mean,
-            elite_best,
-            effective_lr,
-            entropy_metric,
-            mpc_loss_metric,
-            len(state.elites),
-        )
+            if config.use_plateau_schedule:
+                stage_episode = float(episode_metrics.get("stage_episode", 0.0))
+                smoothed_return = float(state.stage_reward_ema)
+                if math.isfinite(smoothed_return) and smoothed_return > state.best_stage_reward + config.plateau_threshold:
+                    state.best_stage_reward = smoothed_return
+                    state.plateau_counter = 0
+                    state.last_improvement_episode = global_episode
+                else:
+                    warmup_passed = (
+                        stage_episode >= float(config.plateau_warmup_episodes)
+                        and global_episode >= int(config.plateau_global_warmup_episodes)
+                    )
+                    if not warmup_passed:
+                        state.plateau_counter = 0
+                    else:
+                        state.plateau_counter += 1
+                        episodes_since_improvement = global_episode - max(state.last_improvement_episode, 0)
+                        if (
+                            state.plateau_counter >= config.plateau_patience
+                            and episodes_since_improvement >= config.plateau_patience
+                        ):
+                            min_floor = max(
+                                config.min_learning_rate / max(config.learning_rate, 1e-12),
+                                config.plateau_min_scale,
+                            )
+                            scaled_scale = max(state.lr_scale * config.plateau_factor, min_floor)
+                            if scaled_scale < state.lr_scale - 1e-9:
+                                state.lr_scale = scaled_scale
+                                logger.info(
+                                    "Learning-rate plateau detected (episode %s, stage=%s, ema=%.3f, best_ema=%.3f). Scaling LR to %.6e",
+                                    global_episode,
+                                    stage_name,
+                                    smoothed_return,
+                                    state.best_stage_reward,
+                                    float(base_lr) * state.lr_scale,
+                                )
+                            state.plateau_counter = 0
+                episodes_since_improvement_metric = global_episode - max(state.last_improvement_episode, 0)
+            if config.adaptive_lr_enabled:
+                lower_bound = max(config.adaptive_lr_min_scale, config.plateau_min_scale)
+                state.lr_scale = float(np.clip(state.lr_scale, lower_bound, config.adaptive_lr_max_scale))
+            best_stage_metric = state.best_stage_reward if math.isfinite(state.best_stage_reward) else float("nan")
+            episode_metrics["plateau_counter"] = float(state.plateau_counter)
+            episode_metrics["best_return"] = state.best_return
+            episode_metrics["best_stage_reward"] = best_stage_metric
+            episode_metrics["episodes_since_improvement"] = float(episodes_since_improvement_metric)
+            state.history.append(episode_metrics)
 
-    logger.info("Training loop complete. Elites maintained: %s", len(state.elites))
-    if artifacts_dir is not None:
-        save_training_artifacts(state.history, artifacts_dir, config, state.pretraining_metrics)
-        checkpoint_paths = save_policy_checkpoints(state, artifacts_dir)
-        logger.info(
-            "Saved policy checkpoints: %s",
-            ", ".join(path.name for path in checkpoint_paths.values()),
-        )
+            log_stage_progress = float(episode_metrics.get("action_blend_progress", float("nan")))
+            raw_reward_mean = float(episode_metrics.get("reward_raw_mean", float("nan")))
+            entropy_metric = float(episode_metrics.get("entropy", float("nan")))
+            mpc_loss_metric = float(episode_metrics.get("mpc_loss_mean", float("nan")))
+            logger.info(
+                (
+                    "Episode %s/%s | stage=%s (disturbance=%.2f, progress=%.2f) | "
+                    "return=%.3f | reward_mean=%.3f (raw=%.3f) | elite_best=%.3f | "
+                    "lr=%.3e | entropy=%.3f | mpc_loss=%.3f | elites=%s"
+                ),
+                episode + 1,
+                total_episodes,
+                stage_name,
+                stage_disturbance,
+                log_stage_progress,
+                episode_return,
+                reward_mean,
+                raw_reward_mean,
+                elite_best,
+                effective_lr,
+                entropy_metric,
+                mpc_loss_metric,
+                len(state.elites),
+            )
+    except KeyboardInterrupt:
+        interrupted = True
+        logger.warning("Training interrupted by user; saving checkpoints before exit.")
+    finally:
+        if artifacts_dir is not None:
+            save_training_artifacts(state.history, artifacts_dir, config, state.pretraining_metrics)
+            checkpoint_paths = save_policy_checkpoints(state, artifacts_dir)
+            logger.info(
+                "Saved policy checkpoints: %s",
+                ", ".join(path.name for path in checkpoint_paths.values()),
+            )
+            if video_config.enabled:
+                try:
+                    recorded_videos = _record_policy_video(
+                        state,
+                        policy_funcs,
+                        config,
+                        curriculum,
+                        video_config,
+                        artifacts_dir,
+                        logger,
+                    )
+                except Exception as exc:  # pragma: no cover - robustness guard
+                    logger.warning("Failed to record evaluation video: %s", exc)
+        elif video_config.enabled:
+            logger.warning("Video recording requested but no output directory was provided; skipping.")
+
+    if interrupted:
+        logger.info("Training terminated early after %s episodes.", len(state.history))
+    else:
+        logger.info("Training loop complete. Elites maintained: %s", len(state.elites))
+
+    if recorded_videos:
+        logger.info("Saved evaluation video(s): %s", ", ".join(video.name for video in recorded_videos))
+
     return state
 
 
@@ -1376,6 +1427,160 @@ def _evaluate_candidate(
             steps += 1
         base_normalizer = local_rms
     return total / max(1, eval_episodes)
+
+
+def _record_policy_video(
+    state: TrainingState,
+    funcs,
+    config: PpoEvolutionConfig,
+    curriculum: List[CurriculumStage],
+    video_config: VideoRecordingConfig,
+    output_dir: Path,
+    logger: logging.Logger,
+) -> List[Path]:
+    if not video_config.enabled:
+        return []
+
+    try:
+        import imageio.v2 as imageio  # type: ignore[import]
+    except ImportError as exc:  # pragma: no cover - optional dependency guard
+        logger.warning("imageio is unavailable, skipping evaluation video recording: %s", exc)
+        return []
+
+    if not curriculum:
+        logger.warning("Skipping video recording because no curriculum stages are defined.")
+        return []
+
+    video_dir = output_dir / video_config.video_folder
+    video_dir.mkdir(parents=True, exist_ok=True)
+
+    stage: Optional[CurriculumStage] = None
+    if video_config.stage_name:
+        stage_lookup = {item.name: item for item in curriculum}
+        stage = stage_lookup.get(video_config.stage_name)
+        if stage is None:
+            logger.warning(
+                "Requested stage '%s' was not found; defaulting to current stage for video",
+                video_config.stage_name,
+            )
+    if stage is None:
+        stage = curriculum[min(state.stage_index, len(curriculum) - 1)]
+
+    video_length_frames = max(1, int(video_config.video_length))
+    max_eval_steps = max(1, int(config.evaluation_max_steps))
+    rollout_steps = min(video_length_frames, max_eval_steps)
+
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    base_name = f"{video_config.name_prefix}-{timestamp}"
+    video_path = video_dir / f"{base_name}.mp4"
+    suffix = 1
+    while video_path.exists():
+        video_path = video_dir / f"{base_name}-{suffix:02d}.mp4"
+        suffix += 1
+
+    fps = max(1, int(video_config.fps))
+
+    eval_env = TvcGymnasiumEnv(
+        render_mode="rgb_array",
+        width=max(1, int(video_config.width)),
+        height=max(1, int(video_config.height)),
+        disturbance_scale=float(video_config.disturbance_scale),
+        max_steps=max_eval_steps,
+        camera=video_config.camera,
+    )
+
+    writer = None
+    try:
+        base_env = eval_env.base_env
+        if hasattr(base_env, "apply_rocket_params"):
+            try:
+                base_env.apply_rocket_params(config.params)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("Unable to apply rocket parameters to video environment: %s", exc)
+        if hasattr(base_env, "configure_stage"):
+            base_env.configure_stage(stage)
+
+        try:
+            writer = imageio.get_writer(
+                video_path,
+                fps=fps,
+                codec="libx264",
+                quality=8,
+                macro_block_size=None,
+            )
+        except Exception as exc:  # pragma: no cover - runtime guard
+            logger.warning("Unable to initialise video writer at %s: %s", video_path, exc)
+            return []
+
+        obs, _ = eval_env.reset()
+        obs_array = jnp.asarray(obs, dtype=jnp.float32)
+        local_rms = RunningNormalizer(
+            count=float(state.obs_rms.count),
+            mean=jnp.array(state.obs_rms.mean, copy=True),
+            m2=jnp.array(state.obs_rms.m2, copy=True),
+        )
+        local_rms = _update_normalizer(local_rms, obs_array)
+        norm_obs = _normalize_observation(local_rms, obs_array)
+
+        initial_frame = np.asarray(eval_env.render(), dtype=np.uint8)
+        writer.append_data(initial_frame)
+        frames_written = 1
+
+        done = False
+        steps = 0
+        cached_plan: Optional[jnp.ndarray] = None
+        cached_mpc_action = jnp.zeros(2, dtype=jnp.float32)
+        policy_weight, mpc_weight, _ = _resolve_action_blend_weights(
+            config,
+            stage,
+            stage_episode=config.action_blend_transition_episodes,
+            progress_override=1.0,
+        )
+        mpc_interval = max(1, int(config.mpc_interval))
+        env_limit = float(getattr(base_env, "ctrl_limit", config.mpc_config.control_limit))
+        action_limit = float(min(env_limit, config.mpc_config.control_limit))
+
+        while not done and steps < rollout_steps and frames_written < video_length_frames:
+            if steps % mpc_interval == 0:
+                rocket_state = _gather_state(base_env)
+                cached_mpc_action, _, cached_plan = compute_tvc_mpc_action(
+                    rocket_state,
+                    stage.target_state,
+                    config.params,
+                    config.mpc_config,
+                    warm_start=cached_plan,
+                )
+            policy_action = funcs.actor(state.params, norm_obs, None, video_config.deterministic)
+            blended_action = policy_weight * policy_action + mpc_weight * cached_mpc_action
+            action = jnp.clip(blended_action, -action_limit, action_limit)
+            obs, _, terminated, truncated, _ = eval_env.step(np.asarray(action, dtype=np.float32))
+            obs_array = jnp.asarray(obs, dtype=jnp.float32)
+            local_rms = _update_normalizer(local_rms, obs_array)
+            norm_obs = _normalize_observation(local_rms, obs_array)
+            done = bool(terminated or truncated)
+            steps += 1
+
+            if frames_written >= video_length_frames:
+                break
+
+            frame = np.asarray(eval_env.render(), dtype=np.uint8)
+            writer.append_data(frame)
+            frames_written += 1
+    finally:
+        try:
+            if writer is not None:
+                writer.close()
+                if not video_path.exists():
+                    logger.warning("Video writer closed without producing a file at %s", video_path)
+        finally:
+            eval_env.close()
+
+    if not video_path.exists():
+        logger.warning("Video recording was requested but no MP4 file was produced.")
+        return []
+
+    logger.info("Recorded evaluation video at %s (%s frames)", video_path.name, video_length_frames)
+    return [video_path]
 
 
 def save_training_artifacts(
