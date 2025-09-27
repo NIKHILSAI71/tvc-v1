@@ -184,7 +184,8 @@ def _build_optimizer(
     if config.grad_clip_norm and config.grad_clip_norm > 0.0:
         transforms.append(optax.clip_by_global_norm(config.grad_clip_norm))
     transforms.append(optax.adamw(learning_rate=learning_rate, weight_decay=config.weight_decay))
-    optimiser = optax.chain(*transforms)
+    base_transform = optax.chain(*transforms)
+    optimiser = optax.apply_if_finite(base_transform, max_consecutive_errors=5)
     return optimiser, schedule
 
 
@@ -747,6 +748,9 @@ def _collect_rollout(
     policy_action_resets = 0
     mpc_action_resets = 0
     blended_action_resets = 0
+    std_min_bound = float(math.exp(config.policy_config.log_std_min))
+    std_max_bound = float(math.exp(config.policy_config.log_std_max))
+    std_fallback = float(math.exp(config.policy_config.log_std_init))
 
     for step in range(config.rollout_length):
         state.rng, policy_key, dropout_key = jax.random.split(state.rng, 3)
@@ -757,9 +761,21 @@ def _collect_rollout(
             key=dropout_key if use_dropout else None,
             deterministic=not use_dropout,
         )
+        mean = jnp.nan_to_num(mean, nan=0.0, posinf=action_limit, neginf=-action_limit)
+        log_std = jnp.nan_to_num(
+            log_std,
+            nan=config.policy_config.log_std_init,
+            posinf=config.policy_config.log_std_max,
+            neginf=config.policy_config.log_std_min,
+        )
+        log_std = jnp.clip(log_std, config.policy_config.log_std_min, config.policy_config.log_std_max)
+        value = jnp.nan_to_num(value, nan=0.0)
         std = jnp.exp(log_std)
+        std = jnp.nan_to_num(std, nan=std_fallback)
+        std = jnp.clip(std, std_min_bound, std_max_bound)
         epsilon = jax.random.normal(policy_key, shape=mean.shape)
         policy_action = mean + std * epsilon
+        policy_action = jnp.nan_to_num(policy_action, nan=0.0, posinf=action_limit, neginf=-action_limit)
         if not bool(jnp.all(jnp.isfinite(policy_action))):
             policy_action_resets += 1
             policy_action = mean
@@ -773,21 +789,36 @@ def _collect_rollout(
                 config.mpc_config,
                 warm_start=cached_plan,
             )
-            mpc_loss_values.append(float(mpc_diag.get("mpc_loss", 0.0)))
-            mpc_grad_norms.append(float(mpc_diag.get("mpc_grad_norm", 0.0)))
-            mpc_iterations.append(float(mpc_diag.get("mpc_iterations", config.mpc_config.iterations)))
-            mpc_saturation.append(float(mpc_diag.get("mpc_saturation", 0.0)))
+            mpc_loss_value = float(mpc_diag.get("mpc_loss", 0.0))
+            if not math.isfinite(mpc_loss_value):
+                mpc_loss_value = 0.0
+            mpc_loss_values.append(mpc_loss_value)
+            mpc_grad = float(mpc_diag.get("mpc_grad_norm", 0.0))
+            if not math.isfinite(mpc_grad):
+                mpc_grad = 0.0
+            mpc_grad_norms.append(mpc_grad)
+            mpc_iters_val = float(mpc_diag.get("mpc_iterations", config.mpc_config.iterations))
+            if not math.isfinite(mpc_iters_val):
+                mpc_iters_val = float(config.mpc_config.iterations)
+            mpc_iterations.append(mpc_iters_val)
+            mpc_sat_val = float(mpc_diag.get("mpc_saturation", 0.0))
+            if not math.isfinite(mpc_sat_val):
+                mpc_sat_val = 0.0
+            mpc_saturation.append(mpc_sat_val)
+            cached_mpc_action = jnp.nan_to_num(cached_mpc_action, nan=0.0, posinf=action_limit, neginf=-action_limit)
             if not bool(jnp.all(jnp.isfinite(cached_mpc_action))):
                 mpc_action_resets += 1
                 cached_plan = None
                 cached_mpc_action = jnp.zeros_like(cached_mpc_action)
             cached_mpc_action = jnp.clip(cached_mpc_action, -action_limit, action_limit)
         else:
-            cached_mpc_action = jnp.clip(cached_mpc_action, -action_limit, action_limit)
+            cached_mpc_action = jnp.clip(jnp.nan_to_num(cached_mpc_action, nan=0.0, posinf=action_limit, neginf=-action_limit), -action_limit, action_limit)
         blended_action = policy_weight * policy_action + mpc_weight * cached_mpc_action
         combined_action = jnp.clip(blended_action, -action_limit, action_limit)
+        combined_action = jnp.nan_to_num(combined_action, nan=0.0, posinf=action_limit, neginf=-action_limit)
 
         log_prob = _gaussian_log_prob(mean, log_std, policy_action)
+        log_prob = jnp.nan_to_num(log_prob, nan=-1e6, posinf=0.0, neginf=-1e6)
 
         combined_action_np = np.asarray(combined_action, dtype=np.float32)
         if not np.isfinite(combined_action_np).all():
@@ -795,6 +826,7 @@ def _collect_rollout(
             fallback_np = np.asarray(np.clip(cached_mpc_action, -action_limit, action_limit), dtype=np.float32)
             combined_action_np = fallback_np
             combined_action = jnp.asarray(combined_action_np)
+        combined_action = jnp.nan_to_num(combined_action, nan=0.0, posinf=action_limit, neginf=-action_limit)
         result: StepResult = env.step(combined_action_np)
         result_info = result.info
         normalised_reward = float(result_info.get("reward_normalised", result.reward))
@@ -803,13 +835,13 @@ def _collect_rollout(
         normalised_reward_buffer.append(normalised_reward)
 
         obs_buffer.append(norm_observation)
-        action_buffer.append(policy_action)
-        applied_action_buffer.append(combined_action)
-        mpc_action_buffer.append(cached_mpc_action)
+        action_buffer.append(jnp.nan_to_num(policy_action, nan=0.0, posinf=action_limit, neginf=-action_limit))
+        applied_action_buffer.append(jnp.nan_to_num(combined_action, nan=0.0, posinf=action_limit, neginf=-action_limit))
+        mpc_action_buffer.append(jnp.nan_to_num(cached_mpc_action, nan=0.0, posinf=action_limit, neginf=-action_limit))
         logprob_buffer.append(float(log_prob))
         reward_buffer.append(scaled_reward)
         raw_reward_buffer.append(raw_reward)
-        value_buffer.append(float(value))
+        value_buffer.append(float(jnp.nan_to_num(value, nan=0.0)))
         done_buffer.append(float(result.done))
 
         if info_sums is None:
@@ -836,15 +868,29 @@ def _collect_rollout(
             norm_observation = _normalize_observation(obs_rms, observation)
 
     # Bootstrap value for final state.
-    value_buffer.append(float(funcs.value(state.params, norm_observation)))
+    bootstrap_value = funcs.value(state.params, norm_observation)
+    value_buffer.append(float(jnp.nan_to_num(bootstrap_value, nan=0.0)))
+
+    observations = jnp.nan_to_num(jnp.stack(obs_buffer), nan=0.0)
+    actions = jnp.nan_to_num(
+        jnp.stack(action_buffer),
+        nan=0.0,
+        posinf=action_limit,
+        neginf=-action_limit,
+    )
+    log_probs = jnp.nan_to_num(jnp.array(logprob_buffer), nan=-1e6, posinf=0.0, neginf=-1e6)
+    log_probs = jnp.clip(log_probs, -1e6, 0.0)
+    rewards = jnp.nan_to_num(jnp.array(reward_buffer), nan=0.0)
+    values = jnp.nan_to_num(jnp.array(value_buffer), nan=0.0)
+    dones = jnp.nan_to_num(jnp.array(done_buffer), nan=0.0, posinf=1.0, neginf=0.0)
 
     batch = {
-        "observations": jnp.stack(obs_buffer),
-        "actions": jnp.stack(action_buffer),
-        "log_probs": jnp.array(logprob_buffer),
-        "rewards": jnp.array(reward_buffer),
-        "values": jnp.array(value_buffer),
-        "dones": jnp.array(done_buffer),
+        "observations": observations,
+        "actions": actions,
+        "log_probs": log_probs,
+        "rewards": rewards,
+        "values": values,
+        "dones": dones,
     }
     state.obs_rms = obs_rms
     info_metrics: Dict[str, float] = {}
@@ -872,7 +918,7 @@ def _collect_rollout(
             }
         )
     if len(value_buffer) > 1:
-        value_array = jnp.array(value_buffer[:-1])
+        value_array = jnp.nan_to_num(jnp.array(value_buffer[:-1]), nan=0.0)
         info_metrics["value_mean"] = float(jnp.mean(value_array))
         info_metrics["value_std"] = float(jnp.std(value_array))
     if mpc_loss_values:
@@ -899,11 +945,11 @@ def _collect_rollout(
     info_metrics["action_blend_progress"] = stage_progress
     info_metrics["reward_scale"] = reward_scale
     if raw_reward_buffer:
-        raw_rewards = jnp.array(raw_reward_buffer)
+        raw_rewards = jnp.nan_to_num(jnp.array(raw_reward_buffer), nan=0.0)
         info_metrics["reward_raw_mean"] = float(jnp.mean(raw_rewards))
         info_metrics["reward_raw_std"] = float(jnp.std(raw_rewards))
     if normalised_reward_buffer:
-        norm_rewards = jnp.array(normalised_reward_buffer)
+        norm_rewards = jnp.nan_to_num(jnp.array(normalised_reward_buffer), nan=0.0)
         info_metrics["reward_normalised_mean"] = float(jnp.mean(norm_rewards))
         info_metrics["reward_normalised_std"] = float(jnp.std(norm_rewards))
     if policy_action_resets:
@@ -1043,6 +1089,8 @@ def _ppo_update(
     )
 
     advantages = (advantages - jnp.mean(advantages)) / (jnp.std(advantages) + 1e-8)
+    advantages = jnp.nan_to_num(advantages, nan=0.0)
+    returns = jnp.nan_to_num(returns, nan=0.0)
 
     dataset = {
         "obs": batch["observations"],
@@ -1056,7 +1104,10 @@ def _ppo_update(
     def loss_fn(params, minibatch):
         mean, log_std, values = funcs.distribution(params, minibatch["obs"], key=None, deterministic=True)
         log_prob = jax.vmap(_gaussian_log_prob, in_axes=(0, None, 0))(mean, log_std, minibatch["actions"])
+        log_prob = jnp.nan_to_num(log_prob, nan=-1e6, posinf=0.0, neginf=-1e6)
         ratio = jnp.exp(log_prob - minibatch["log_probs"])
+        ratio = jnp.nan_to_num(ratio, nan=1.0, posinf=1e6, neginf=0.0)
+        ratio = jnp.clip(ratio, 1e-6, 1e6)
         clipped = jnp.clip(ratio, 1.0 - config.clip_epsilon, 1.0 + config.clip_epsilon)
         surrogate = ratio * minibatch["advantages"]
         clipped_surrogate = clipped * minibatch["advantages"]
@@ -1072,9 +1123,12 @@ def _ppo_update(
         entropy = jnp.mean(
             jnp.sum(log_std + 0.5 * jnp.log(2.0 * jnp.pi * jnp.e), axis=-1)
         )
+        entropy = jnp.nan_to_num(entropy, nan=0.0)
         approx_kl = jnp.mean(minibatch["log_probs"] - log_prob)
+        approx_kl = jnp.nan_to_num(approx_kl, nan=0.0)
         approx_kl = jnp.maximum(approx_kl, 0.0)
         clip_fraction = jnp.mean((jnp.abs(ratio - 1.0) > config.clip_epsilon).astype(jnp.float32))
+        clip_fraction = jnp.nan_to_num(clip_fraction, nan=0.0)
         total_loss = actor_loss + config.value_coef * value_loss - config.entropy_coef * entropy
         return total_loss, (entropy, approx_kl, actor_loss, value_loss, clip_fraction)
 
