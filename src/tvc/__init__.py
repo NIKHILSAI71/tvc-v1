@@ -9,13 +9,14 @@ ensure_jax_runtime()
 
 if TYPE_CHECKING:  # pragma: no cover - import-time side effects only
     from .curriculum import build_curriculum
-    from .env import Tvc2DEnv, make_mjx_batch
+    from .env import Tvc2DEnv, TvcGymnasiumEnv, make_mjx_batch
     from .mpc import compute_tvc_mpc_action
     from .policies import build_policy_network, evaluate_policy
     from .training import save_policy_checkpoints, train_controller
 else:
     _env = import_module(".env", __name__)
     Tvc2DEnv = _env.Tvc2DEnv
+    TvcGymnasiumEnv = _env.TvcGymnasiumEnv
     make_mjx_batch = _env.make_mjx_batch
 
     _mpc = import_module(".mpc", __name__)
@@ -34,6 +35,7 @@ else:
 
 __all__ = [
     "Tvc2DEnv",
+    "TvcGymnasiumEnv",
     "make_mjx_batch",
     "compute_tvc_mpc_action",
     "build_policy_network",
