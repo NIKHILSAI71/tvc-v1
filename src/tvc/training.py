@@ -94,20 +94,20 @@ class PpoEvolutionConfig:
     curriculum_adaptation: bool = True
     curriculum_reward_smoothing: float = 0.25
     reward_scale: float = 1.0
-    policy_action_weight: float = 0.85
-    mpc_action_weight: float = 0.15
-    policy_action_weight_warmup: float = 0.3
-    mpc_action_weight_warmup: float = 0.7
+    policy_action_weight: float = 0.8
+    mpc_action_weight: float = 0.2
+    policy_action_weight_warmup: float = 0.1
+    mpc_action_weight_warmup: float = 0.9
     action_blend_transition_episodes: int = 120
     progressive_action_blend: bool = True
     plateau_warmup_episodes: int = 40
     plateau_min_scale: float = 0.2
-    mpc_loss_backoff_threshold: float = 3800.0
-    mpc_loss_backoff_slope: float = 2.0
+    mpc_loss_backoff_threshold: float = 2200.0
+    mpc_loss_backoff_slope: float = 1.6
     mpc_loss_ema_decay: float = 0.45
-    mpc_min_weight: float = 0.12
-    mpc_backoff_warmup_episodes: int = 45
-    mpc_backoff_reward_gate: float = 0.05
+    mpc_min_weight: float = 0.1
+    mpc_backoff_warmup_episodes: int = 16
+    mpc_backoff_reward_gate: float | None = None
     adaptive_lr_cooldown_episodes: int = 3
     mpc_bc_enabled: bool = False
     mpc_bc_steps: int = 0
@@ -131,6 +131,7 @@ class TrainingState:
     update_step: int = 0
     lr_schedule: Callable[[int], float] | None = None
     lr_scale: float = 1.0
+    lr_schedule_active: bool = False
     best_return: float = -float("inf")
     best_stage_reward: float = -float("inf")
     plateau_counter: int = 0
@@ -260,6 +261,8 @@ def _mpc_behavior_cloning_warmup(
     obs_list: List[jnp.ndarray] = []
     action_list: List[jnp.ndarray] = []
     warm_plan: jnp.ndarray | None = None
+    if hasattr(env, "configure_stage"):
+        env.configure_stage(stage)
     observation = jnp.asarray(env.reset(disturbance_scale=stage.disturbance_scale), dtype=jnp.float32)
     local_rms = obs_rms
     env_limit = float(getattr(env, "ctrl_limit", config.mpc_config.control_limit))
@@ -289,6 +292,8 @@ def _mpc_behavior_cloning_warmup(
         result = env.step(np.asarray(jnp.clip(mpc_action, -action_limit, action_limit), dtype=np.float32))
         observation = jnp.asarray(result.observation, dtype=jnp.float32)
         if result.done:
+            if hasattr(env, "configure_stage"):
+                env.configure_stage(stage)
             observation = jnp.asarray(env.reset(disturbance_scale=stage.disturbance_scale), dtype=jnp.float32)
             warm_plan = None
 
@@ -361,6 +366,8 @@ def _mpc_behavior_cloning_warmup(
     )
 
     # Reset environment to a clean state before PPO rollouts.
+    if hasattr(env, "configure_stage"):
+        env.configure_stage(stage)
     env.reset(disturbance_scale=stage.disturbance_scale)
     return params, local_rms, rng, metrics
 
@@ -509,6 +516,8 @@ def train_controller(
     except Exception as exc:  # pragma: no cover - defensive path
         logger.warning("Unable to apply rocket parameters to environment: %s", exc)
 
+    if initial_stage is not None and hasattr(env, "configure_stage"):
+        env.configure_stage(initial_stage)
     disturbance_scale = float(initial_stage.disturbance_scale) if initial_stage else 1.0
     sample_obs = jnp.asarray(env.reset(disturbance_scale=disturbance_scale), dtype=jnp.float32)
     rng, init_key = jax.random.split(rng)
@@ -525,6 +534,8 @@ def train_controller(
         obs_rms,
         logger,
     )
+    if initial_stage is not None and hasattr(env, "configure_stage"):
+        env.configure_stage(initial_stage)
     sample_obs = jnp.asarray(env.reset(disturbance_scale=disturbance_scale), dtype=jnp.float32)
     obs_rms = _update_normalizer(obs_rms, sample_obs)
 
@@ -572,6 +583,8 @@ def train_controller(
         stage = curriculum[stage_idx]
         stage_name = stage.name
         stage_disturbance = float(stage.disturbance_scale)
+        if hasattr(env, "configure_stage"):
+            env.configure_stage(stage)
         trajectories, rollout_stats = _collect_rollout(env, stage, state, policy_funcs, config)
         state = _ppo_update(state, trajectories, optimiser, policy_funcs, config)
         _maybe_update_adaptive_lr(state, config)
@@ -587,7 +600,10 @@ def train_controller(
             episode_return,
         )
 
-        base_lr = state.lr_schedule(state.update_step) if state.lr_schedule is not None else config.learning_rate
+        if state.lr_schedule is not None and state.lr_schedule_active:
+            base_lr = state.lr_schedule(state.update_step)
+        else:
+            base_lr = config.learning_rate
         effective_lr = float(base_lr) * state.lr_scale
         stage, stage_metrics = _update_stage_progress(state, curriculum, stage, episode_return, logger, config)
 
@@ -619,6 +635,7 @@ def train_controller(
             "learning_rate_base": float(base_lr),
             "learning_rate": effective_lr,
             "lr_scale": state.lr_scale,
+            "lr_schedule_active": float(bool(state.lr_schedule_active)),
         }
         episode_metrics.update(rollout_stats)
         if state.last_aux:
@@ -733,6 +750,8 @@ def _collect_rollout(
     value_buffer: List[float] = []
     done_buffer: List[float] = []
 
+    if hasattr(env, "configure_stage"):
+        env.configure_stage(stage)
     observation = jnp.asarray(env.reset(disturbance_scale=stage.disturbance_scale), dtype=jnp.float32)
     obs_rms = state.obs_rms
     obs_rms = _update_normalizer(obs_rms, observation)
@@ -879,6 +898,8 @@ def _collect_rollout(
         obs_rms = _update_normalizer(obs_rms, observation)
         norm_observation = _normalize_observation(obs_rms, observation)
         if result.done:
+            if hasattr(env, "configure_stage"):
+                env.configure_stage(stage)
             observation = jnp.asarray(env.reset(disturbance_scale=stage.disturbance_scale), dtype=jnp.float32)
             obs_rms = _update_normalizer(obs_rms, observation)
             norm_observation = _normalize_observation(obs_rms, observation)
@@ -1063,6 +1084,15 @@ def _update_stage_progress(
     if state.stage_episode >= stage.episodes:
         should_advance = True
 
+    if not state.lr_schedule_active:
+        reward_gate = stage.reward_threshold if stage.reward_threshold is not None else config.curriculum_reward_smoothing
+        min_episodes_for_lr = max(stage.min_episodes, 1)
+        if (
+            state.stage_episode >= min_episodes_for_lr
+            and (reward_gate is None or state.stage_reward_ema >= reward_gate)
+        ):
+            state.lr_schedule_active = True
+
     if should_advance and state.stage_index < len(curriculum) - 1:
         previous_stage = stage.name
         state.stage_index += 1
@@ -1076,6 +1106,7 @@ def _update_stage_progress(
         state.last_improvement_episode = 0
         stage = curriculum[state.stage_index]
         state.current_stage_name = stage.name
+        state.lr_schedule_active = False
         metrics["stage_transition"] = 1.0
         logger.info("Advancing curriculum from %s to %s", previous_stage, stage.name)
         if config.adaptive_lr_enabled:
@@ -1308,6 +1339,8 @@ def _evaluate_candidate(
     )
     mpc_interval = max(1, int(config.mpc_interval))
     for _ in range(eval_episodes):
+        if hasattr(env, "configure_stage"):
+            env.configure_stage(stage)
         obs = jnp.asarray(env.reset(disturbance_scale=stage.disturbance_scale), dtype=jnp.float32)
         local_rms = _update_normalizer(base_normalizer, obs)
         norm_obs = _normalize_observation(local_rms, obs)
