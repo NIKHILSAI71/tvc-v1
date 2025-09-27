@@ -65,6 +65,10 @@ class PpoEvolutionConfig:
     lr_final_fraction: float = 0.4
     schedule_min_updates: int = 1500
     entropy_coef: float = 5e-3
+    entropy_target: float = 0.6
+    entropy_adjust_speed: float = 0.08
+    entropy_coef_min: float = 1e-4
+    entropy_coef_max: float = 2e-2
     value_coef: float = 1.0
     use_plateau_schedule: bool = True
     plateau_patience: int = 4
@@ -140,6 +144,7 @@ class TrainingState:
     lr_adjust_cooldown: int = 0
     lr_adjust_last_direction: int = 0
     pretraining_metrics: Dict[str, Any] | None = None
+    entropy_scale: float = 1.0
 
 
 @dataclass
@@ -1101,6 +1106,17 @@ def _ppo_update(
         "value_preds": batch["values"][:-1],
     }
 
+    base_entropy_coef = float(config.entropy_coef)
+    entropy_scale = float(state.entropy_scale)
+    entropy_coef = base_entropy_coef * entropy_scale
+    entropy_coef = float(
+        np.clip(
+            entropy_coef,
+            max(float(config.entropy_coef_min), 0.0),
+            max(float(config.entropy_coef_max), max(float(config.entropy_coef_min), 0.0) + 1e-9),
+        )
+    )
+
     def loss_fn(params, minibatch):
         mean, log_std, values = funcs.distribution(params, minibatch["obs"], key=None, deterministic=True)
         log_prob = jax.vmap(_gaussian_log_prob, in_axes=(0, None, 0))(mean, log_std, minibatch["actions"])
@@ -1129,7 +1145,7 @@ def _ppo_update(
         approx_kl = jnp.maximum(approx_kl, 0.0)
         clip_fraction = jnp.mean((jnp.abs(ratio - 1.0) > config.clip_epsilon).astype(jnp.float32))
         clip_fraction = jnp.nan_to_num(clip_fraction, nan=0.0)
-        total_loss = actor_loss + config.value_coef * value_loss - config.entropy_coef * entropy
+        total_loss = actor_loss + config.value_coef * value_loss - entropy_coef * entropy
         return total_loss, (entropy, approx_kl, actor_loss, value_loss, clip_fraction)
 
     params = state.params
@@ -1165,12 +1181,36 @@ def _ppo_update(
         for key in metrics_sums:
             metrics_sums[key] /= total_batches
 
+    metrics_sums["entropy_coef"] = entropy_coef
+
+    entropy_target = float(config.entropy_target)
+    can_adapt_entropy = (
+        base_entropy_coef > 0.0
+        and float(config.entropy_coef_max) > float(config.entropy_coef_min)
+    )
+    if entropy_target > 0.0 and can_adapt_entropy and math.isfinite(metrics_sums["entropy"]):
+        observed_entropy = metrics_sums["entropy"]
+        if math.isfinite(observed_entropy):
+            error = entropy_target - observed_entropy
+            adjust_speed = max(float(config.entropy_adjust_speed), 0.0)
+            if adjust_speed > 0.0:
+                adjust_factor = math.exp(adjust_speed * error)
+                denom = max(base_entropy_coef, 1e-6)
+                min_scale = float(config.entropy_coef_min) / denom
+                max_scale = float(config.entropy_coef_max) / denom
+                min_scale = max(min_scale, 1e-6)
+                max_scale = max(max_scale, min_scale + 1e-6)
+                new_scale = float(np.clip(state.entropy_scale * adjust_factor, min_scale, max_scale))
+                state.entropy_scale = new_scale
+    metrics_sums["entropy_scale"] = state.entropy_scale
+
     state.last_aux = {
         **metrics_sums,
         "advantage_std": float(jnp.std(advantages)),
         "advantage_mean": float(jnp.mean(advantages)),
         "return_mean": float(jnp.mean(returns)),
         "return_std": float(jnp.std(returns)),
+        "entropy_scale": state.entropy_scale,
     }
     return state
 
