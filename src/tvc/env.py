@@ -9,7 +9,7 @@ parallel scenarios.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Tuple, TYPE_CHECKING
 
 import math
 
@@ -18,6 +18,9 @@ import numpy as np
 from mujoco import mjx
 
 from .dynamics import RocketParams
+
+if TYPE_CHECKING:  # pragma: no cover - typing aid
+    from .curriculum import CurriculumStage
 
 mujoco: Any = _mujoco
 
@@ -72,7 +75,56 @@ class Tvc2DEnv:
         self._reward_m2 = 0.0
         self._reward_norm_warmup = 64
         self._reward_norm_clip = 6.0
+        self._stage_config = {
+            "target_altitude": 4.0,
+            "target_pitch": 0.0,
+            "target_vertical_velocity": 0.0,
+            "target_lateral": 0.0,
+            "phase": "hover",
+            "initial_altitude": None,
+            "initial_vertical_velocity": 0.0,
+            "initial_pitch": 0.0,
+            "initial_pitch_rate": 0.0,
+            "initial_lateral": 0.0,
+            "initial_lateral_velocity": 0.0,
+            "pitch_tolerance": 0.12,
+            "pitch_rate_tolerance": 0.45,
+            "altitude_tolerance": 0.5,
+            "vertical_velocity_tolerance": 0.6,
+            "lateral_tolerance": 0.6,
+            "lateral_velocity_tolerance": 0.6,
+            "tolerance_bonus": 0.45,
+        }
         mujoco.mj_forward(self.model, self.data)
+
+    # ---------------------------------------------------------------------
+    # Stage configuration helpers
+    # ---------------------------------------------------------------------
+
+    def configure_stage(self, stage: "CurriculumStage") -> None:
+        """Applies curriculum-specific targets and initial conditions."""
+
+        stage_dict: Dict[str, Any] = {
+            "target_altitude": float(getattr(stage, "target_altitude", 4.0)),
+            "target_pitch": float(getattr(stage, "target_pitch", 0.0)),
+            "target_vertical_velocity": float(getattr(stage, "target_vertical_velocity", 0.0)),
+            "target_lateral": float(getattr(stage, "target_lateral", 0.0)),
+            "phase": getattr(stage, "phase", "hover"),
+            "initial_altitude": getattr(stage, "initial_altitude", None),
+            "initial_vertical_velocity": float(getattr(stage, "initial_vertical_velocity", 0.0)),
+            "initial_pitch": float(getattr(stage, "initial_pitch", 0.0)),
+            "initial_pitch_rate": float(getattr(stage, "initial_pitch_rate", 0.0)),
+            "initial_lateral": float(getattr(stage, "initial_lateral", 0.0)),
+            "initial_lateral_velocity": float(getattr(stage, "initial_lateral_velocity", 0.0)),
+            "pitch_tolerance": float(getattr(stage, "pitch_tolerance", 0.12)),
+            "pitch_rate_tolerance": float(getattr(stage, "pitch_rate_tolerance", 0.45)),
+            "altitude_tolerance": float(getattr(stage, "altitude_tolerance", 0.5)),
+            "vertical_velocity_tolerance": float(getattr(stage, "vertical_velocity_tolerance", 0.6)),
+            "lateral_tolerance": float(getattr(stage, "lateral_tolerance", 0.6)),
+            "lateral_velocity_tolerance": float(getattr(stage, "lateral_velocity_tolerance", 0.6)),
+            "tolerance_bonus": float(getattr(stage, "tolerance_bonus", 0.45)),
+        }
+        self._stage_config.update(stage_dict)
 
     def apply_rocket_params(self, params: RocketParams | None) -> None:
         """Reconfigures the MuJoCo model to match supplied physical parameters."""
@@ -114,17 +166,32 @@ class Tvc2DEnv:
 
         mujoco.mj_resetData(self.model, self.data)
         # Initial altitude and alignment.
-        self.data.qpos[2] = 3.5
+        config = self._stage_config
+        base_altitude = config.get("initial_altitude")
+        base_altitude = 3.5 if base_altitude is None else float(base_altitude)
+        self.data.qpos[2] = base_altitude
         self.data.qvel[:] = 0.0
 
+        base_vertical_velocity = float(config.get("initial_vertical_velocity", 0.0))
+        self.data.qvel[2] = base_vertical_velocity
+
         # Inject bounded disturbances to mimic pre-launch uncertainties.
-        angle_disturb = self._rng.normal(0.0, 0.02 * disturbance_scale)
-        mujoco.mju_axisAngle2Quat(self.data.qpos[3:7], np.array([1.0, 0.0, 0.0]), angle_disturb)
-        self.data.qvel[3:6] = self._rng.normal(0.0, 0.5 * disturbance_scale, size=3)
+        base_pitch = float(config.get("initial_pitch", 0.0))
+        angle_noise = self._rng.normal(0.0, 0.02 * disturbance_scale)
+        mujoco.mju_axisAngle2Quat(
+            self.data.qpos[3:7], np.array([1.0, 0.0, 0.0]), base_pitch + angle_noise
+        )
+        base_pitch_rate = float(config.get("initial_pitch_rate", 0.0))
+        self.data.qvel[3] = self._rng.normal(0.0, 0.5 * disturbance_scale)
+        self.data.qvel[4] = base_pitch_rate + self._rng.normal(0.0, 0.5 * disturbance_scale)
+        self.data.qvel[5] = self._rng.normal(0.0, 0.5 * disturbance_scale)
 
         # Random lateral offsets.
-        self.data.qpos[0] = self._rng.normal(0.0, 0.3 * disturbance_scale)
-        self.data.qvel[0] = self._rng.normal(0.0, 0.5 * disturbance_scale)
+        base_lateral = float(config.get("initial_lateral", 0.0))
+        base_lateral_velocity = float(config.get("initial_lateral_velocity", 0.0))
+        self.data.qpos[0] = base_lateral + self._rng.normal(0.0, 0.3 * disturbance_scale)
+        self.data.qvel[0] = base_lateral_velocity + self._rng.normal(0.0, 0.5 * disturbance_scale)
+        self.data.qvel[2] += self._rng.normal(0.0, 0.4 * disturbance_scale)
 
         mujoco.mj_forward(self.model, self.data)
         self._step_counter = 0
@@ -191,12 +258,38 @@ class Tvc2DEnv:
         thrust = float(self.data.ctrl[0])
         pitch = self._pitch()
         pitch_rate = self._pitch_rate()
+        config = self._stage_config
+        pitch_tolerance = max(float(config.get("pitch_tolerance", 0.12)), 1e-6)
+        pitch_rate_tol = max(float(config.get("pitch_rate_tolerance", 0.45)), 1e-6)
+        lateral_tolerance = max(float(config.get("lateral_tolerance", 0.6)), 1e-6)
+        lateral_vel_tol = max(float(config.get("lateral_velocity_tolerance", 0.6)), 1e-6)
+        altitude_tolerance = max(float(config.get("altitude_tolerance", 0.5)), 1e-6)
+        vertical_vel_tol = max(float(config.get("vertical_velocity_tolerance", 0.6)), 1e-6)
+
+        target_pitch = float(config.get("target_pitch", 0.0))
+        target_altitude = float(config.get("target_altitude", 4.0))
+        target_lateral = float(config.get("target_lateral", 0.0))
+        target_vertical_vel = float(config.get("target_vertical_velocity", 0.0))
+
         lateral = float(self.data.qpos[0])
+        lateral_error = lateral - target_lateral
         lateral_vel = float(self.data.qvel[0])
         altitude = float(self.data.qpos[2])
+        altitude_error = target_altitude - altitude
         vertical_vel = float(self.data.qvel[2])
+        vertical_vel_error = vertical_vel - target_vertical_vel
+        pitch_error = pitch - target_pitch
+
         return np.array(
-            [thrust, pitch, pitch_rate, lateral, lateral_vel, altitude, vertical_vel],
+            [
+                thrust,
+                pitch_error / pitch_tolerance,
+                pitch_rate / pitch_rate_tol,
+                lateral_error / lateral_tolerance,
+                lateral_vel / lateral_vel_tol,
+                altitude_error / altitude_tolerance,
+                vertical_vel_error / vertical_vel_tol,
+            ],
             dtype=np.float32,
         )
 
@@ -212,65 +305,106 @@ class Tvc2DEnv:
         return float(self.data.qvel[4])
 
     def _reward(self) -> Tuple[float, Dict[str, float]]:
+        config = self._stage_config
+        target_pitch = float(config.get("target_pitch", 0.0))
+        target_altitude = float(config.get("target_altitude", 4.0))
+        target_vertical_velocity = float(config.get("target_vertical_velocity", 0.0))
+        target_lateral = float(config.get("target_lateral", 0.0))
+
         pitch = self._pitch()
+        pitch_error = pitch - target_pitch
         pitch_rate = self._pitch_rate()
-        lateral = float(self.data.qpos[0])
+        lateral = float(self.data.qpos[0]) - target_lateral
         lateral_vel = float(self.data.qvel[0])
-        altitude_error = 4.0 - float(self.data.qpos[2])
-        vertical_vel = float(self.data.qvel[2])
+        altitude = float(self.data.qpos[2])
+        altitude_error = target_altitude - altitude
+        vertical_vel_raw = float(self.data.qvel[2])
+        vertical_vel_error = vertical_vel_raw - target_vertical_velocity
         jerk = float(np.linalg.norm(self.data.qacc[:3]))
         ctrl_jitter = float(np.linalg.norm(np.diff(self.data.ctrl)))
         ctrl_magnitude = float(np.linalg.norm(self.data.ctrl[1:3]))
 
-        # Normalised quadratic costs using scenario-appropriate tolerances.
-        def _quad(value: float, tolerance: float) -> float:
-            scale = max(tolerance, 1e-6)
-            return (value / scale) ** 2
+        pitch_scale = max(float(config.get("pitch_tolerance", 0.12)), 1e-6)
+        pitch_rate_scale = max(float(config.get("pitch_rate_tolerance", 0.45)), 1e-6)
+        lateral_scale = max(float(config.get("lateral_tolerance", 0.6)), 1e-6)
+        lateral_vel_scale = max(float(config.get("lateral_velocity_tolerance", 0.6)), 1e-6)
+        altitude_scale = max(float(config.get("altitude_tolerance", 0.5)), 1e-6)
+        vertical_scale = max(float(config.get("vertical_velocity_tolerance", 0.6)), 1e-6)
 
-        pitch_cost = _quad(pitch, 0.18)
-        pitch_rate_cost = _quad(pitch_rate, 0.6)
-        lateral_cost = _quad(lateral, 1.0)
-        lateral_vel_cost = _quad(lateral_vel, 1.2)
-        altitude_cost = _quad(altitude_error, 0.8)
-        vertical_vel_cost = _quad(vertical_vel, 1.4)
-        jerk_cost = _quad(jerk, 40.0)
-        ctrl_jitter_cost = _quad(ctrl_jitter, 0.25)
-        ctrl_mag_cost = _quad(ctrl_magnitude, 0.28)
+        def _exp_penalty(value: float, scale: float) -> float:
+            return 1.0 - math.exp(-abs(value) / scale)
 
         penalty = (
-            0.38 * pitch_cost
-            + 0.16 * pitch_rate_cost
-            + 0.26 * lateral_cost
-            + 0.12 * lateral_vel_cost
-            + 0.34 * altitude_cost
-            + 0.22 * vertical_vel_cost
-            + 0.05 * jerk_cost
-            + 0.04 * ctrl_jitter_cost
-            + 0.03 * ctrl_mag_cost
+            0.42 * _exp_penalty(pitch_error, pitch_scale)
+            + 0.18 * _exp_penalty(pitch_rate, pitch_rate_scale)
+            + 0.22 * _exp_penalty(lateral, lateral_scale)
+            + 0.16 * _exp_penalty(lateral_vel, lateral_vel_scale)
+            + 0.32 * _exp_penalty(altitude_error, altitude_scale)
+            + 0.24 * _exp_penalty(vertical_vel_error, vertical_scale)
+            + 0.05 * _exp_penalty(jerk, 18.0)
+            + 0.04 * _exp_penalty(ctrl_jitter, 0.18)
+            + 0.03 * _exp_penalty(ctrl_magnitude, 0.2)
         )
 
-        # Smooth positive shaping encouraging hover stability and gentle control.
         stability_bonus = float(
-            0.45
-            * math.exp(-0.5 * ((pitch / 0.11) ** 2 + (lateral / 0.55) ** 2))
+            0.35
+            * math.exp(-0.5 * ((pitch_error / max(pitch_scale * 0.8, 1e-6)) ** 2 + (lateral / max(lateral_scale * 0.8, 1e-6)) ** 2))
         )
         hover_bonus = float(
-            0.35 * math.exp(-0.5 * ((altitude_error / 0.35) ** 2 + (vertical_vel / 0.45) ** 2))
+            0.25
+            * math.exp(
+                -0.5
+                * (
+                    (altitude_error / max(altitude_scale * 0.75, 1e-6)) ** 2
+                    + (vertical_vel_error / max(vertical_scale * 0.8, 1e-6)) ** 2
+                )
+            )
         )
-        attitude_bonus = float(0.25 * math.exp(-0.5 * (pitch_rate / 0.35) ** 2))
+        attitude_bonus = float(0.22 * math.exp(-0.5 * (pitch_rate / max(pitch_rate_scale * 0.8, 1e-6)) ** 2))
         action_bonus = float(0.12 * math.exp(-0.5 * (ctrl_magnitude / 0.18) ** 2))
 
-        raw_reward = 1.0 - penalty + stability_bonus + hover_bonus + attitude_bonus + action_bonus
+        within_pitch = abs(pitch_error) <= pitch_scale
+        within_altitude = abs(altitude_error) <= altitude_scale
+        within_lateral = abs(lateral) <= lateral_scale
+        within_vertical = abs(vertical_vel_error) <= vertical_scale
+        tolerance_bonus = float(config.get("tolerance_bonus", 0.45)) if (
+            within_pitch and within_altitude and within_lateral and within_vertical
+        ) else 0.0
+
+        phase_bonus = 0.0
+        phase = config.get("phase", "hover")
+        if phase == "launch":
+            ascent_velocity = max(0.0, vertical_vel_raw - target_vertical_velocity)
+            phase_bonus = float(0.12 * math.tanh(ascent_velocity / max(vertical_scale, 1e-6)))
+        elif phase == "landing":
+            descent_error = abs(vertical_vel_error)
+            phase_bonus = float(0.1 * math.exp(-descent_error / max(vertical_scale, 1e-6)))
+        elif phase == "attitude":
+            phase_bonus = float(0.08 * math.exp(-abs(pitch_error) / max(pitch_scale * 0.6, 1e-6)))
+
+        raw_reward = (
+            1.2
+            - penalty
+            + stability_bonus
+            + hover_bonus
+            + attitude_bonus
+            + action_bonus
+            + phase_bonus
+            + tolerance_bonus
+        )
         raw_reward = float(np.clip(raw_reward, -5.0, 3.0))
         normalised_reward, reward_std = self._normalise_reward(raw_reward)
 
         return normalised_reward, {
-            "pitch_error": pitch,
+            "pitch": pitch,
+            "pitch_error": pitch_error,
             "pitch_rate": pitch_rate,
             "lateral": lateral,
             "lateral_vel": lateral_vel,
+            "altitude": altitude,
             "altitude_error": altitude_error,
-            "vertical_velocity": vertical_vel,
+            "vertical_velocity": vertical_vel_raw,
+            "vertical_velocity_error": vertical_vel_error,
             "jerk": jerk,
             "ctrl_jitter": ctrl_jitter,
             "ctrl_magnitude": ctrl_magnitude,
@@ -279,10 +413,18 @@ class Tvc2DEnv:
             "hover_bonus": hover_bonus,
             "attitude_bonus": attitude_bonus,
             "action_bonus": action_bonus,
+            "phase_bonus": phase_bonus,
+            "tolerance_bonus": tolerance_bonus,
             "raw_reward": raw_reward,
             "reward_normalised": normalised_reward,
             "reward_running_mean": self._reward_mean,
             "reward_running_std": reward_std,
+            "target_pitch": target_pitch,
+            "target_altitude": target_altitude,
+            "target_vertical_velocity": target_vertical_velocity,
+            "pitch_tolerance": pitch_scale,
+            "altitude_tolerance": altitude_scale,
+            "vertical_velocity_tolerance": vertical_scale,
         }
 
     def _normalise_reward(self, value: float) -> Tuple[float, float]:
