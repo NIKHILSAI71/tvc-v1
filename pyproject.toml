@@ -23,7 +23,9 @@ dependencies = [
   "tqdm>=4.66.5",
   "warp-lang>=1.9.0",
   "mujoco-mjx>=3.3.6",
-  "matplotlib>=3.9.2"
+  "matplotlib>=3.9.2",
+  "gymnasium>=0.29.1",
+  "imageio[ffmpeg]>=2.33"
 ]
 
 [project.optional-dependencies]
