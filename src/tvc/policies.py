@@ -48,9 +48,9 @@ class PolicyConfig:
     """Policy network configuration for 3D TVC."""
     hidden_dims: Tuple[int, ...] = (512, 512, 256, 128)
     activation: Callable[[jnp.ndarray], jnp.ndarray] = nn.silu
-    log_std_init: float = -2.0
-    log_std_min: float = -4.0
-    log_std_max: float = -1.2
+    log_std_init: float = -0.5  # Increased from -2.0 for better initial exploration
+    log_std_min: float = -2.5  # Relaxed from -4.0 to prevent extreme compression
+    log_std_max: float = 0.5   # Increased from -1.2 for healthy entropy
     dropout_rate: float = 0.0
     use_layer_norm: bool = True
     action_limit: float = 0.3  # TVC gimbal limit
