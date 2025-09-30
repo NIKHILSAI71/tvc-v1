@@ -180,10 +180,11 @@ def _collect_rollout(
     obs_rms = state.obs_rms
     norm_observation = obs_rms.normalize(observation)
 
-    # Track final state for success evaluation
-    final_pos_error = float('inf')
-    final_vel_error = float('inf')
-    final_orient_alignment = 0.0
+    # Track each episode's success within the rollout
+    episode_successes = []
+    episode_returns = []
+    current_episode_return = 0.0
+    current_episode_steps = 0
 
     for step in range(config.rollout_length):
         state.rng, policy_key = jax.random.split(state.rng)
@@ -213,22 +214,72 @@ def _collect_rollout(
         reward_buffer.append(step_result.reward)
         done_buffer.append(1.0 if step_result.done else 0.0)
 
-        # Update final state metrics
+        current_episode_return += step_result.reward
+        current_episode_steps += 1
+
+        # Check success at episode termination
+        if step_result.done:
+            pos = env.data.qpos[0:3]
+            vel = env.data.qvel[0:3]
+            quat = env.data.qpos[3:7]
+            target_pos = np.array(stage.target_position, dtype=np.float32)
+            target_vel = np.array(stage.target_velocity, dtype=np.float32)
+            target_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+
+            pos_error = float(np.linalg.norm(pos - target_pos))
+            vel_error = float(np.linalg.norm(vel - target_vel))
+            orient_alignment = float(np.abs(np.dot(quat, target_quat)))
+
+            # Evaluate success at episode end
+            episode_success = (
+                pos_error < stage.position_tolerance and
+                vel_error < stage.velocity_tolerance and
+                orient_alignment > 0.95
+            )
+
+            episode_successes.append(episode_success)
+            episode_returns.append(current_episode_return)
+
+            # Reset episode tracking
+            current_episode_return = 0.0
+            current_episode_steps = 0
+
+            observation = env.reset()
+            norm_observation = obs_rms.normalize(observation)
+        else:
+            norm_observation = obs_rms.normalize(step_result.observation)
+
+    # If rollout ended mid-episode, evaluate current state
+    if current_episode_steps > 0:
         pos = env.data.qpos[0:3]
         vel = env.data.qvel[0:3]
         quat = env.data.qpos[3:7]
         target_pos = np.array(stage.target_position, dtype=np.float32)
         target_vel = np.array(stage.target_velocity, dtype=np.float32)
         target_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
-        final_pos_error = float(np.linalg.norm(pos - target_pos))
-        final_vel_error = float(np.linalg.norm(vel - target_vel))
-        final_orient_alignment = float(np.abs(np.dot(quat, target_quat)))
 
-        if step_result.done:
-            observation = env.reset()
-            norm_observation = obs_rms.normalize(observation)
-        else:
-            norm_observation = obs_rms.normalize(step_result.observation)
+        pos_error = float(np.linalg.norm(pos - target_pos))
+        vel_error = float(np.linalg.norm(vel - target_vel))
+        orient_alignment = float(np.abs(np.dot(quat, target_quat)))
+
+        episode_success = (
+            pos_error < stage.position_tolerance and
+            vel_error < stage.velocity_tolerance and
+            orient_alignment > 0.95
+        )
+
+        episode_successes.append(episode_success)
+        episode_returns.append(current_episode_return)
+    else:
+        # Use last completed episode if rollout ended exactly on episode boundary
+        pos = env.data.qpos[0:3]
+        vel = env.data.qvel[0:3]
+        quat = env.data.qpos[3:7]
+        target_pos = np.array(stage.target_position, dtype=np.float32)
+        target_vel = np.array(stage.target_velocity, dtype=np.float32)
+
+        pos_error = float(np.linalg.norm(pos - target_pos))
+        vel_error = float(np.linalg.norm(vel - target_vel))
 
     # Final value for bootstrap
     _, _, final_value = funcs.distribution(
@@ -258,24 +309,26 @@ def _collect_rollout(
         "dones": jnp.array(done_buffer, dtype=jnp.float32),
     }
 
-    # Evaluate success criteria
-    episode_success = (
-        final_pos_error < stage.position_tolerance and
-        final_vel_error < stage.velocity_tolerance and
-        final_orient_alignment > 0.95
-    )
+    # Aggregate success across all episodes in rollout
+    overall_success = any(episode_successes) if episode_successes else False
+    num_episodes = len(episode_successes)
+    num_successful = sum(episode_successes)
+    success_rate = num_successful / num_episodes if num_episodes > 0 else 0.0
 
     stats = {
-        "episode_return": float(jnp.sum(rewards_array)),  # Report unnormalized return
+        "episode_return": float(jnp.sum(rewards_array)),  # Total return across all episodes in rollout
         "reward_mean": float(jnp.mean(rewards_array)),
         "reward_std": float(jnp.std(rewards_array)),
         "value_mean": float(jnp.mean(batch["values"][:-1])),
         "action_mean": float(jnp.mean(jnp.abs(batch["actions"]))),
         "reward_normalized": normalize_rewards,
-        "episode_success": episode_success,
-        "final_position_error": final_pos_error,
-        "final_velocity_error": final_vel_error,
-        "final_orientation_alignment": final_orient_alignment,
+        "episode_success": overall_success,  # True if ANY episode succeeded
+        "final_position_error": pos_error,
+        "final_velocity_error": vel_error,
+        "final_orientation_alignment": orient_alignment,
+        "num_episodes_in_rollout": num_episodes,
+        "num_successful_episodes": num_successful,
+        "rollout_success_rate": success_rate,
     }
 
     return batch, stats
@@ -457,6 +510,7 @@ def train_controller(
     config: TrainingConfig = TrainingConfig(),
     output_dir: Path | None = None,
     seed: int = 42,
+    resume_from: Path | None = None,  # Resume from checkpoint
 ) -> TrainingState:
     """Enhanced PPO + Evolution training with visualization."""
 
@@ -487,15 +541,21 @@ def train_controller(
 
     # Setup optimizer with adaptive learning rate schedule
     # Cosine annealing with warmup for stable learning
-    warmup_steps = 50  # Warmup for first 50 episodes
-    total_steps = total_episodes
-    lr_schedule = optax.warmup_cosine_decay_schedule(
-        init_value=config.learning_rate * 0.1,  # Start at 10% of target LR
-        peak_value=config.learning_rate,  # Peak at target LR
-        warmup_steps=warmup_steps,
-        decay_steps=total_steps - warmup_steps,
-        end_value=config.learning_rate * 0.1,  # End at 10% for fine-tuning
-    )
+    # For very short training runs (< 10 episodes), skip warmup to avoid scheduling issues
+    if total_episodes < 10:
+        # Use constant learning rate for short runs
+        lr_schedule = config.learning_rate
+    else:
+        warmup_steps = min(50, max(1, total_episodes // 10))  # Adaptive warmup based on total episodes
+        total_steps = total_episodes
+        decay_steps = max(1, total_steps - warmup_steps)  # Ensure positive decay_steps
+        lr_schedule = optax.warmup_cosine_decay_schedule(
+            init_value=config.learning_rate * 0.1,  # Start at 10% of target LR
+            peak_value=config.learning_rate,  # Peak at target LR
+            warmup_steps=warmup_steps,
+            decay_steps=decay_steps,
+            end_value=config.learning_rate * 0.1,  # End at 10% for fine-tuning
+        )
 
     optimizer = optax.chain(
         optax.clip_by_global_norm(config.grad_clip_norm),
@@ -506,6 +566,24 @@ def train_controller(
     )
     opt_state = optimizer.init(params)
 
+    # Resume from checkpoint if specified
+    start_episode = 0
+    if resume_from and resume_from.exists():
+        LOGGER.info("📂 Resuming from checkpoint: %s", resume_from)
+        try:
+            with open(resume_from, "rb") as f:
+                params = serialization.from_bytes(params, f.read())
+            # Try to load training history if available
+            history_path = resume_from.parent.parent / "training_history.json"
+            if history_path.exists():
+                with open(history_path, "r") as f:
+                    history = json.load(f)
+                start_episode = len(history)
+                LOGGER.info("📊 Loaded history: %d episodes completed", start_episode)
+        except Exception as e:
+            LOGGER.warning("⚠️ Could not resume from checkpoint: %s", e)
+            LOGGER.info("Starting fresh training...")
+
     state = TrainingState(
         params=params,
         opt_state=opt_state,
@@ -513,14 +591,14 @@ def train_controller(
         obs_rms=obs_rms,
     )
 
-    LOGGER.info("✅ Training initialized | Policy params: %d",
-                sum(p.size for p in jax.tree_util.tree_leaves(params)))
+    LOGGER.info("✅ Training initialized | Policy params: %d | Start episode: %d",
+                sum(p.size for p in jax.tree_util.tree_leaves(params)), start_episode)
 
     current_entropy_coef = config.entropy_coef
     start_time = time.time()
 
     # Training loop
-    for episode in range(total_episodes):
+    for episode in range(start_episode, total_episodes):
         episode_start = time.time()
 
         # Select curriculum stage
@@ -680,13 +758,28 @@ def train_controller(
                     f.write(serialization.to_bytes(state.params))
                 LOGGER.info("🏆 New best policy saved: %s (return: %.2f)", best_path, episode_return)
 
-        # Stage progression
+        # Stage progression - Auto-advance based on performance
         state.stage_episode += 1
-        if state.stage_episode >= stage.episodes and state.stage_index < len(curriculum) - 1:
+
+        # Check if we should progress to next stage (performance-based)
+        can_progress = (
+            state.stage_index < len(curriculum) - 1 and
+            state.stage_episode >= stage.min_episodes and  # Minimum episodes completed
+            (
+                # Either: completed scheduled episodes
+                state.stage_episode >= stage.episodes or
+                # Or: achieved high success rate early (80%+ over last 20 episodes)
+                (rolling_success_rate >= 0.8 and state.stage_episode >= stage.min_episodes)
+            )
+        )
+
+        if can_progress:
             LOGGER.info("=" * 80)
             LOGGER.info("📈 STAGE COMPLETE: %s | Success Rate: %.1f%% (%d/%d)",
                        stage.name, stage_success_rate * 100,
                        state.stage_successes, state.stage_attempts)
+            if rolling_success_rate >= 0.8 and state.stage_episode < stage.episodes:
+                LOGGER.info("🚀 EARLY PROGRESSION: Achieved 80%% rolling success rate!")
             LOGGER.info("📈 STAGE PROGRESSION: %s → %s",
                        stage.name, curriculum[state.stage_index + 1].name)
             LOGGER.info("=" * 80)
