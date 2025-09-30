@@ -166,13 +166,40 @@ def mutate_parameters(
     rng: PRNGKey,
     variables: Variables,
     scale: float = 0.02,
+    mutation_prob: float = 0.8,
 ) -> Variables:
-    """Apply Gaussian mutations to policy parameters for evolutionary search."""
-    leaves, tree_def = jax.tree_util.tree_flatten(variables)
-    keys = jax.random.split(rng, num=len(leaves))
+    """Apply selective Gaussian mutations to policy parameters.
 
-    mutated_leaves = [
-        leaf + scale * jax.random.normal(key, shape=leaf.shape, dtype=leaf.dtype)
-        for leaf, key in zip(leaves, keys)
-    ]
+    Based on rocket stabilization neuroevolution:
+    - Only mutate a fraction of parameters (controlled by mutation_prob)
+    - Use Gaussian noise scaled by parameter magnitude
+    - Helps maintain network structure while exploring
+
+    Args:
+        rng: JAX random key
+        variables: Policy parameters to mutate
+        scale: Mutation scale factor
+        mutation_prob: Probability of mutating each parameter
+
+    Returns:
+        Mutated parameters
+    """
+    leaves, tree_def = jax.tree_util.tree_flatten(variables)
+    rng_keys = jax.random.split(rng, num=len(leaves) * 2)
+    mut_keys = rng_keys[:len(leaves)]
+    mask_keys = rng_keys[len(leaves):]
+
+    mutated_leaves = []
+    for leaf, mut_key, mask_key in zip(leaves, mut_keys, mask_keys):
+        # Generate mutation mask (which parameters to mutate)
+        mutation_mask = jax.random.uniform(mask_key, shape=leaf.shape) < mutation_prob
+
+        # Generate Gaussian noise scaled by parameter magnitude + scale
+        noise = jax.random.normal(mut_key, shape=leaf.shape, dtype=leaf.dtype)
+        adaptive_scale = scale * (1.0 + jnp.abs(leaf))  # Larger params get larger mutations
+
+        # Apply masked mutation
+        mutation = jnp.where(mutation_mask, noise * adaptive_scale, 0.0)
+        mutated_leaves.append(leaf + mutation)
+
     return cast(Variables, jax.tree_util.tree_unflatten(tree_def, mutated_leaves))
