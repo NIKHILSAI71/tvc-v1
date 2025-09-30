@@ -1,0 +1,195 @@
+<!--
+  Realistic 3D MJCF model of a thrust-vector-controlled rocket with
+  full 6DOF movement and AI-controlled thrust magnitude for real-time training.
+-->
+<mujoco model="tvc_rocket_3d">
+  <compiler angle="radian" inertiafromgeom="true"/>
+  <option timestep="0.002" gravity="0 0 -9.81" integrator="RK4"/>
+
+  <default>
+    <joint armature="0.0" damping="0.2" limited="true"/>
+    <geom density="1200" friction="0.6 0.1 0.1"/>
+    <motor gear="1" ctrlrange="-1 1"/>
+  </default>
+
+  <asset>
+    <!-- Enhanced textures for 3D visualization -->
+    <texture name="sky" type="skybox" builtin="gradient" rgb1="0.75 0.86 0.97" rgb2="0.94 0.98 1.0" width="1024" height="1024"/>
+    <texture name="ground_grid" type="2d" builtin="checker" rgb1="1 1 1" rgb2="0.2 0.2 0.2" width="2048" height="2048"/>
+    
+    <!-- Enhanced materials for 3D realism -->
+    <material name="ground_mat" texture="ground_grid" texrepeat="128 128" reflectance="0.05"/>
+    <material name="rocket_white" rgba="0.95 0.95 0.98 1" specular="0.6" shininess="0.8"/>
+    <material name="rocket_black" rgba="0.08 0.08 0.1 1" specular="0.4" shininess="0.6"/>
+    <material name="engine_metal" rgba="0.4 0.42 0.48 1" specular="0.8" shininess="0.9"/>
+    <material name="gimbal_frame" rgba="0.3 0.32 0.38 1" specular="0.7" shininess="0.8"/>
+    <material name="flame" rgba="0.98 0.5 0.1 0.7" emission="0.6"/>
+    <material name="thrust_trail" rgba="0.9 0.4 0.05 0.4" emission="0.4"/>
+  </asset>
+
+  <worldbody>
+    <!-- Enhanced ground plane with landing area markers -->
+    <body name="ground" pos="0 0 0">
+      <geom name="ground_plane" type="plane" size="100 100 1" material="ground_mat"/>
+      
+      <!-- Landing pad visualization -->
+      <geom name="landing_pad" type="cylinder" pos="0 0 0.01" size="2 0.01" rgba="1 1 0 0.8" contype="0" conaffinity="0"/>
+      <geom name="landing_target" type="cylinder" pos="0 0 0.02" size="0.3 0.005" rgba="1 0 0 0.9" contype="0" conaffinity="0"/>
+    </body>
+
+    <!-- Realistic 3D rocket with full 6DOF movement -->
+    <body name="vehicle" pos="0 0 8">
+      <!-- Free joint for full 6DOF movement (position + orientation) -->
+      <freejoint name="vehicle_free"/>
+      
+      <!-- Main rocket body - SpaceX Falcon 9 inspired proportions -->
+      <geom name="rocket_main" type="cylinder" pos="0 0 0" size="0.25 2.5" material="rocket_white" mass="8.0"/>
+      
+      <!-- Structural elements -->
+      <geom name="rocket_upper" type="cylinder" pos="0 0 1.8" size="0.24 0.7" material="rocket_white" mass="1.5"/>
+      <geom name="rocket_band_1" type="cylinder" pos="0 0 1.0" size="0.26 0.08" material="rocket_black" mass="0.2"/>
+      <geom name="rocket_band_2" type="cylinder" pos="0 0 -0.8" size="0.26 0.08" material="rocket_black" mass="0.2"/>
+      
+      <!-- Nose cone assembly -->
+      <geom name="nose_cone" type="cylinder" pos="0 0 2.7" size="0.22 0.2" material="rocket_white" mass="0.5"/>
+      <geom name="nose_tip" type="cylinder" pos="0 0 2.95" size="0.12 0.05" material="rocket_white" mass="0.15"/>
+      <geom name="nose_point" type="cylinder" pos="0 0 3.02" size="0.03 0.02" material="rocket_white" mass="0.05"/>
+      
+      <!-- Four grid fins for realistic 3D aerodynamics -->
+      <geom name="fin_1" type="box" pos="0.35 0 -2.2" size="0.18 0.03 0.25" material="rocket_black" mass="0.15"/>
+      <geom name="fin_2" type="box" pos="-0.35 0 -2.2" size="0.18 0.03 0.25" material="rocket_black" mass="0.15"/>
+      <geom name="fin_3" type="box" pos="0 0.35 -2.2" size="0.03 0.18 0.25" material="rocket_black" mass="0.15"/>
+      <geom name="fin_4" type="box" pos="0 -0.35 -2.2" size="0.03 0.18 0.25" material="rocket_black" mass="0.15"/>
+      
+      <!-- Landing legs (folded position) -->
+      <geom name="leg_1" type="capsule" fromto="0.2 0.2 -2.0 0.4 0.4 -2.8" size="0.02" material="rocket_black" mass="0.1"/>
+      <geom name="leg_2" type="capsule" fromto="-0.2 0.2 -2.0 -0.4 0.4 -2.8" size="0.02" material="rocket_black" mass="0.1"/>
+      <geom name="leg_3" type="capsule" fromto="-0.2 -0.2 -2.0 -0.4 -0.4 -2.8" size="0.02" material="rocket_black" mass="0.1"/>
+      <geom name="leg_4" type="capsule" fromto="0.2 -0.2 -2.0 0.4 -0.4 -2.8" size="0.02" material="rocket_black" mass="0.1"/>
+      
+      <!-- Center of mass marker -->
+      <site name="vehicle_cg" pos="0 0 0" size="0.04" rgba="1 0 0 1"/>
+      
+      <!-- 3D TVC System with full gimbal capability -->
+      <body name="tvc_frame" pos="0 0 -2.5">
+        <!-- Engine bay connection -->
+        <geom name="engine_bay" type="cylinder" pos="0 0 0.1" size="0.24 0.1" material="rocket_black" mass="0.8"/>
+        
+        <!-- TVC housing - robust 3D design -->
+        <geom name="tvc_housing" type="cylinder" pos="0 0 0" size="0.38 0.12" material="gimbal_frame" mass="1.2"/>
+        
+        <!-- Visible hydraulic actuators (4 around perimeter) -->
+        <geom name="actuator_1" type="box" pos="0.32 0 0" size="0.05 0.04 0.08" material="engine_metal" mass="0.15"/>
+        <geom name="actuator_2" type="box" pos="-0.32 0 0" size="0.05 0.04 0.08" material="engine_metal" mass="0.15"/>
+        <geom name="actuator_3" type="box" pos="0 0.32 0" size="0.04 0.05 0.08" material="engine_metal" mass="0.15"/>
+        <geom name="actuator_4" type="box" pos="0 -0.32 0" size="0.04 0.05 0.08" material="engine_metal" mass="0.15"/>
+        
+        <!-- Gimbal system - X-axis (pitch) -->
+        <body name="gimbal_x" pos="0 0 0">
+          <joint name="tvc_x" type="hinge" axis="1 0 0" range="-0.3 0.3" damping="25" armature="0.1"/>
+          <geom name="gimbal_ring_x" type="cylinder" pos="0 0 0" size="0.28 0.025" material="gimbal_frame" mass="0.4"/>
+          
+          <!-- X-axis bearings -->
+          <geom name="bearing_x1" type="cylinder" pos="0.28 0 0" size="0.025 0.04" material="engine_metal" mass="0.05"/>
+          <geom name="bearing_x2" type="cylinder" pos="-0.28 0 0" size="0.025 0.04" material="engine_metal" mass="0.05"/>
+          
+          <!-- Y-axis gimbal (yaw) -->
+          <body name="gimbal_y" pos="0 0 0">
+            <joint name="tvc_y" type="hinge" axis="0 1 0" range="-0.3 0.3" damping="25" armature="0.1"/>
+            <geom name="gimbal_ring_y" type="cylinder" pos="0 0 0" size="0.22 0.02" material="gimbal_frame" mass="0.3"/>
+            
+            <!-- Y-axis bearings -->
+            <geom name="bearing_y1" type="cylinder" pos="0 0.22 0" size="0.02 0.035" material="engine_metal" mass="0.04"/>
+            <geom name="bearing_y2" type="cylinder" pos="0 -0.22 0" size="0.02 0.035" material="engine_metal" mass="0.04"/>
+            
+            <!-- Hydraulic actuator rods (visible) -->
+            <geom name="rod_1" type="capsule" fromto="0.18 0 0 0.3 0 0" size="0.012" material="engine_metal" mass="0.02"/>
+            <geom name="rod_2" type="capsule" fromto="-0.18 0 0 -0.3 0 0" size="0.012" material="engine_metal" mass="0.02"/>
+            <geom name="rod_3" type="capsule" fromto="0 0.18 0 0 0.3 0" size="0.012" material="engine_metal" mass="0.02"/>
+            <geom name="rod_4" type="capsule" fromto="0 -0.18 0 0 -0.3 0" size="0.012" material="engine_metal" mass="0.02"/>
+
+            <!-- Merlin-inspired engine assembly -->
+            <body name="engine" pos="0 0 -0.15">
+              <!-- Turbopump assembly -->
+              <geom name="turbopump" type="cylinder" pos="0 0 -0.05" size="0.06 0.08" material="engine_metal" mass="0.3"/>
+              
+              <!-- Combustion chamber -->
+              <geom name="chamber" type="cylinder" pos="0 0 -0.2" size="0.1 0.15" material="engine_metal" mass="1.2"/>
+              
+              <!-- Nozzle throat -->
+              <geom name="throat" type="cylinder" pos="0 0 -0.4" size="0.06 0.05" material="engine_metal" mass="0.4"/>
+              
+              <!-- Nozzle expansion -->
+              <geom name="nozzle_1" type="cylinder" pos="0 0 -0.5" size="0.08 0.05" material="engine_metal" mass="0.3"/>
+              <geom name="nozzle_2" type="cylinder" pos="0 0 -0.6" size="0.12 0.05" material="engine_metal" mass="0.25"/>
+              <geom name="nozzle_3" type="cylinder" pos="0 0 -0.7" size="0.16 0.05" material="engine_metal" mass="0.2"/>
+              
+              <!-- Nozzle exit -->
+              <geom name="nozzle_exit" type="cylinder" pos="0 0 -0.78" size="0.18 0.03" material="engine_metal" mass="0.15"/>
+              
+              <!-- Dynamic thrust plume (will scale with thrust) -->
+              <geom name="exhaust_core" type="capsule" fromto="0 0 -0.75 0 0 -2.5" size="0.12" material="flame" contype="0" conaffinity="0" mass="0.001"/>
+              <geom name="exhaust_outer" type="capsule" fromto="0 0 -0.75 0 0 -3.0" size="0.18" material="thrust_trail" contype="0" conaffinity="0" mass="0.001"/>
+              
+              <!-- Thrust measurement point -->
+              <site name="thrust_site" pos="0 0 -1.5" size="0.05" rgba="1 0.5 0 1"/>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+
+    <!-- Enhanced camera setup for 3D training visualization -->
+    <camera name="follow" mode="trackcom" target="vehicle" pos="0 -12 6" fovy="50"/>
+    <camera name="chase" mode="track" target="vehicle" pos="0 -8 4" fovy="45"/>
+    <camera name="tvc_detail" mode="track" target="tvc_frame" pos="2 -3 -2" fovy="25"/>
+    <camera name="side_view" mode="track" target="vehicle" pos="8 0 4" fovy="40"/>
+    <camera name="top_down" mode="track" target="vehicle" pos="0 0 20" fovy="35"/>
+    <camera name="ground_view" mode="track" target="vehicle" pos="0 -4 1" fovy="60"/>
+    <camera name="cinematic" mode="track" target="vehicle" pos="-6 -10 8" fovy="55"/>
+  </worldbody>
+
+  <!-- 3D Control actuators: TVC + Thrust magnitude -->
+  <actuator>
+    <!-- TVC gimbal control -->
+    <motor name="tvc_pitch" joint="tvc_x" gear="150" ctrlrange="-1 1"/>
+    <motor name="tvc_yaw" joint="tvc_y" gear="150" ctrlrange="-1 1"/>
+    
+  <!-- AI-controlled thrust magnitude (applies upward force at the thrust site) -->
+  <general name="thrust_control" site="thrust_site" ctrlrange="0 1" gear="0 0 500 0 0 0"/>
+  </actuator>
+
+  <!-- Enhanced sensor suite for 3D state estimation -->
+  <sensor>
+    <!-- IMU cluster -->
+    <accelerometer name="imu_acc" site="vehicle_cg"/>
+    <gyro name="imu_gyro" site="vehicle_cg"/>
+    <magnetometer name="imu_mag" site="vehicle_cg"/>
+    
+    <!-- TVC position feedback -->
+    <jointpos name="tvc_x_pos" joint="tvc_x"/>
+    <jointpos name="tvc_y_pos" joint="tvc_y"/>
+    <jointvel name="tvc_x_vel" joint="tvc_x"/>
+    <jointvel name="tvc_y_vel" joint="tvc_y"/>
+    
+    <!-- Full 6DOF state -->
+    <framepos name="rocket_pos" objtype="body" objname="vehicle"/>
+    <framequat name="rocket_orient" objtype="body" objname="vehicle"/>
+    <framelinvel name="rocket_linvel" objtype="body" objname="vehicle"/>
+    <frameangvel name="rocket_angvel" objtype="body" objname="vehicle"/>
+    
+    <!-- Thrust measurement -->
+    <force name="thrust_force" site="thrust_site"/>
+    
+    <!-- Ground proximity -->
+    <rangefinder name="altitude" site="vehicle_cg"/>
+  </sensor>
+
+  <!-- Visual enhancements -->
+  <visual>
+    <global offwidth="1920" offheight="1080"/>
+    <quality shadowsize="2048" offsamples="8"/>
+    <map znear="0.1" zfar="100"/>
+  </visual>
+
+</mujoco>
