@@ -64,11 +64,13 @@ def cmd_train(args) -> int:
 
     # Run training
     try:
+        resume_from = Path(args.resume_from) if args.resume_from else None
         final_state = train_controller(
             total_episodes=args.episodes,
             config=config,
             output_dir=Path(args.output_dir),
             seed=args.seed,
+            resume_from=resume_from,
         )
 
         LOGGER.info("=" * 60)
@@ -198,6 +200,7 @@ def main() -> int:
     train_parser.add_argument("--rollout-length", type=int, default=3072, help="PPO rollout length (optimized)")
     train_parser.add_argument("--num-epochs", type=int, default=4, help="PPO epochs per update")
     train_parser.add_argument("--minibatch-size", type=int, default=256, help="PPO minibatch size (optimized)")
+    train_parser.add_argument("--resume-from", type=str, default=None, help="Resume from checkpoint (e.g., checkpoints/policy_ep0100.msgpack)")
 
     # Evaluate command
     eval_parser = subparsers.add_parser(
