@@ -32,112 +32,116 @@ class CurriculumStage:
 
 
 def build_curriculum() -> List[CurriculumStage]:
-    """Build progressive 3D curriculum."""
+    """Build progressive 3D curriculum with realistic SpaceX-style landing altitudes.
 
-    # Stage 1: Hover at 8m
+    Simulates a landing burn sequence from 50m hover down to touchdown.
+    Realistic velocities based on F9 landing profile (scaled to model).
+    """
+
+    # Stage 1: High hover stabilization at 50m
     hover_stage = CurriculumStage(
         name="hover_stabilization",
         episodes=200,
-        target_position=(0.0, 0.0, 8.0),
+        target_position=(0.0, 0.0, 50.0),
         target_orientation=(1.0, 0.0, 0.0, 0.0),  # upright
         target_velocity=(0.0, 0.0, 0.0),
         target_angular_velocity=(0.0, 0.0, 0.0),
-        initial_position=(0.0, 0.0, 8.0),
+        initial_position=(0.0, 0.0, 50.0),
         initial_velocity=(0.0, 0.0, 0.0),
         initial_orientation=(1.0, 0.0, 0.0, 0.0),
         initial_angular_velocity=(0.0, 0.0, 0.0),
-        position_tolerance=1.2,
-        velocity_tolerance=0.8,
-        orientation_tolerance=0.25,
-        angular_velocity_tolerance=0.6,
+        position_tolerance=2.0,
+        velocity_tolerance=1.0,
+        orientation_tolerance=0.15,
+        angular_velocity_tolerance=0.4,
         tolerance_bonus=0.5,
         reward_threshold=0.15,
         success_episodes=4,
         min_episodes=60,
     )
 
-    # Stage 2: Lateral translation (5m offset)
+    # Stage 2: Lateral translation with offset (10m lateral at 50m altitude)
     lateral_stage = CurriculumStage(
         name="lateral_translation",
         episodes=180,
-        target_position=(0.0, 0.0, 8.0),
+        target_position=(0.0, 0.0, 50.0),
         target_orientation=(1.0, 0.0, 0.0, 0.0),
         target_velocity=(0.0, 0.0, 0.0),
         target_angular_velocity=(0.0, 0.0, 0.0),
-        initial_position=(5.0, 0.0, 8.0),
-        initial_velocity=(-0.3, 0.0, 0.0),
+        initial_position=(10.0, 0.0, 50.0),
+        initial_velocity=(-1.5, 0.0, 0.0),  # ~5.4 km/h lateral velocity
         initial_orientation=(1.0, 0.0, 0.0, 0.0),
         initial_angular_velocity=(0.0, 0.0, 0.0),
-        position_tolerance=1.0,
-        velocity_tolerance=0.7,
-        orientation_tolerance=0.2,
-        angular_velocity_tolerance=0.5,
+        position_tolerance=2.5,
+        velocity_tolerance=1.2,
+        orientation_tolerance=0.15,
+        angular_velocity_tolerance=0.4,
         tolerance_bonus=0.6,
         reward_threshold=0.2,
         success_episodes=4,
         min_episodes=50,
     )
 
-    # Stage 3: Altitude climb (8m → 12m)
+    # Stage 3: Altitude climb (50m → 80m)
     climb_stage = CurriculumStage(
         name="altitude_climb",
         episodes=160,
-        target_position=(0.0, 0.0, 12.0),
+        target_position=(0.0, 0.0, 80.0),
         target_orientation=(1.0, 0.0, 0.0, 0.0),
         target_velocity=(0.0, 0.0, 0.0),
         target_angular_velocity=(0.0, 0.0, 0.0),
-        initial_position=(0.0, 0.0, 8.0),
-        initial_velocity=(0.0, 0.0, 0.5),
+        initial_position=(0.0, 0.0, 50.0),
+        initial_velocity=(0.0, 0.0, 2.0),  # 2 m/s climb rate
         initial_orientation=(1.0, 0.0, 0.0, 0.0),
         initial_angular_velocity=(0.0, 0.0, 0.0),
-        position_tolerance=1.5,
-        velocity_tolerance=0.8,
-        orientation_tolerance=0.2,
-        angular_velocity_tolerance=0.5,
+        position_tolerance=3.0,
+        velocity_tolerance=1.5,
+        orientation_tolerance=0.15,
+        angular_velocity_tolerance=0.4,
         tolerance_bonus=0.55,
         reward_threshold=0.18,
         success_episodes=4,
         min_episodes=45,
     )
 
-    # Stage 4: Controlled descent (12m → 5m)
+    # Stage 4: Controlled descent (80m → 20m) - Main landing burn phase
     descent_stage = CurriculumStage(
         name="controlled_descent",
         episodes=200,
-        target_position=(0.0, 0.0, 5.0),
+        target_position=(0.0, 0.0, 20.0),
         target_orientation=(1.0, 0.0, 0.0, 0.0),
         target_velocity=(0.0, 0.0, 0.0),
         target_angular_velocity=(0.0, 0.0, 0.0),
-        initial_position=(0.0, 0.0, 12.0),
-        initial_velocity=(0.0, 0.0, -0.6),
+        initial_position=(0.0, 0.0, 80.0),
+        initial_velocity=(0.0, 0.0, -3.0),  # -3 m/s descent rate
         initial_orientation=(1.0, 0.0, 0.0, 0.0),
         initial_angular_velocity=(0.0, 0.0, 0.0),
-        position_tolerance=1.0,
-        velocity_tolerance=0.6,
-        orientation_tolerance=0.15,
-        angular_velocity_tolerance=0.4,
+        position_tolerance=2.0,
+        velocity_tolerance=1.0,
+        orientation_tolerance=0.12,
+        angular_velocity_tolerance=0.3,
         tolerance_bonus=0.65,
         reward_threshold=0.22,
         success_episodes=5,
         min_episodes=70,
     )
 
-    # Stage 5: Landing approach (5m → 1m)
+    # Stage 5: Final landing approach (20m → 2m) - Precision landing
     landing_stage = CurriculumStage(
         name="landing_approach",
         episodes=220,
-        target_position=(0.0, 0.0, 1.0),
+        target_position=(0.0, 0.0, 2.0),
         target_orientation=(1.0, 0.0, 0.0, 0.0),
-        target_velocity=(0.0, 0.0, 0.0),
+        target_velocity=(0.0, 0.0, -0.5),  # Slow descent -0.5 m/s
         target_angular_velocity=(0.0, 0.0, 0.0),
-        initial_position=(0.0, 0.0, 5.0),
-        initial_velocity=(0.0, 0.0, -0.4),
+        initial_position=(0.0, 0.0, 20.0),
+        initial_velocity=(0.0, 0.0, -2.0),  # -2 m/s initial descent
         initial_orientation=(1.0, 0.0, 0.0, 0.0),
         initial_angular_velocity=(0.0, 0.0, 0.0),
-        position_tolerance=0.6,
-        velocity_tolerance=0.4,
-        orientation_tolerance=0.1,
-        angular_velocity_tolerance=0.3,
+        position_tolerance=1.0,
+        velocity_tolerance=0.8,
+        orientation_tolerance=0.08,
+        angular_velocity_tolerance=0.2,
         tolerance_bonus=0.7,
         reward_threshold=0.25,
         success_episodes=5,
