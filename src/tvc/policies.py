@@ -1,4 +1,5 @@
-"""Policy architectures for PPO with evolutionary perturbations."""
+"""Policy networks for 3D TVC control."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -44,8 +45,7 @@ class DistributionFn(Protocol):
 
 @dataclass(frozen=True)
 class PolicyConfig:
-    """Defines the actor-critic network structure and initialisation settings."""
-
+    """Policy network configuration for 3D TVC."""
     hidden_dims: Tuple[int, ...] = (512, 512, 256, 128)
     activation: Callable[[jnp.ndarray], jnp.ndarray] = nn.silu
     log_std_init: float = -2.0
@@ -53,11 +53,13 @@ class PolicyConfig:
     log_std_max: float = -1.2
     dropout_rate: float = 0.0
     use_layer_norm: bool = True
-    action_limit: float = 0.28
+    action_limit: float = 0.3  # TVC gimbal limit
+    thrust_limit: float = 1.0  # Thrust fraction [0, 1]
+    action_dims: int = 3  # 3D: [gimbal_x, gimbal_y, thrust]
 
 
 class ActorCritic(nn.Module):
-    """Shared-body actor-critic network handling Gaussian policy outputs."""
+    """Shared-body actor-critic network for 3D control."""
 
     config: PolicyConfig
 
@@ -71,24 +73,32 @@ class ActorCritic(nn.Module):
             x = self.config.activation(x)
             if self.config.dropout_rate > 0.0:
                 x = nn.Dropout(rate=self.config.dropout_rate, name=f"mlp_{idx}_dropout")(x, deterministic=deterministic)
-        mean_raw = nn.Dense(2, name="policy_head")(x)
-        mean = jnp.tanh(mean_raw) * self.config.action_limit
+
+        # Policy head: [gimbal_x, gimbal_y, thrust]
+        mean_raw = nn.Dense(3, name="policy_head")(x)
+        gimbal_mean = jnp.tanh(mean_raw[:2]) * self.config.action_limit
+        thrust_mean = nn.sigmoid(mean_raw[2:3]) * self.config.thrust_limit
+        mean = jnp.concatenate([gimbal_mean, thrust_mean])
+
+        # Value head
         value = nn.Dense(1, name="value_head")(x)
+
+        # Log std head
         log_std_bias = nn.initializers.constant(self.config.log_std_init)
         log_std_head = nn.Dense(
-            2,
+            3,
             name="log_std_head",
             kernel_init=nn.initializers.zeros,
             bias_init=log_std_bias,
         )(x)
         log_std = jnp.clip(log_std_head, self.config.log_std_min, self.config.log_std_max)
+
         return mean, log_std, value.squeeze(-1)
 
 
 @dataclass(frozen=True)
 class PolicyFunctions:
-    """Callable collection for policy initialisation and inference."""
-
+    """Callable collection for policy operations."""
     init: InitFn
     actor: ActorFn
     value: ValueFn
@@ -96,8 +106,7 @@ class PolicyFunctions:
 
 
 def build_policy_network(config: PolicyConfig = PolicyConfig()) -> PolicyFunctions:
-    """Constructs the actor-critic network and returns convenient callables."""
-
+    """Build actor-critic network and return interface functions."""
     module = ActorCritic(config)
 
     def init_fn(key: PRNGKey, sample_obs: jnp.ndarray) -> Variables:
@@ -153,29 +162,12 @@ def build_policy_network(config: PolicyConfig = PolicyConfig()) -> PolicyFunctio
     )
 
 
-def evaluate_policy(
-    variables: Variables,
-    observation: jnp.ndarray,
-    rng: PRNGKey | None,
-    deterministic: bool = False,
-    config: PolicyConfig = PolicyConfig(),
-) -> Tuple[jnp.ndarray, Dict[str, jnp.ndarray]]:
-    """Evaluates the policy and returns the action with diagnostics."""
-
-    funcs = build_policy_network(config)
-    action = funcs.actor(variables, observation, rng, deterministic)
-    mean, log_std, value = funcs.distribution(variables, observation, key=None, deterministic=True)
-    diagnostics = {"mean": mean, "log_std": log_std, "value": value}
-    return action, diagnostics
-
-
 def mutate_parameters(
     rng: PRNGKey,
     variables: Variables,
     scale: float = 0.02,
 ) -> Variables:
-    """Applies isotropic Gaussian mutations to policy parameters for evolution."""
-
+    """Apply Gaussian mutations to policy parameters for evolutionary search."""
     leaves, tree_def = jax.tree_util.tree_flatten(variables)
     keys = jax.random.split(rng, num=len(leaves))
 
