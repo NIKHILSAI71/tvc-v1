@@ -38,6 +38,7 @@ class TvcEnv:
         max_steps: int = 2000,
         seed: int | None = None,
         domain_randomization: bool = True,  # Enable robust training
+        actuator_delay_steps: int = 0,  # Actuator delay (0 = no delay, 1-3 = realistic)
     ) -> None:
         asset_path = model_path or _default_asset_path()
         self.model = mujoco.MjModel.from_xml_path(asset_path)
@@ -66,6 +67,10 @@ class TvcEnv:
         # Action tracking
         self._last_action = np.zeros(3, dtype=np.float64)
         self._prev_action = np.zeros(3, dtype=np.float64)
+
+        # Actuator delay buffer (for realistic hardware simulation)
+        self._actuator_delay_steps = actuator_delay_steps
+        self._action_buffer = [np.zeros(3, dtype=np.float64) for _ in range(max(1, actuator_delay_steps + 1))]
 
         # Stage configuration - Realistic landing scenario altitudes
         self._stage_config = {
@@ -236,9 +241,21 @@ class TvcEnv:
         action[1] = np.clip(action[1], -self._ctrl_limit, self._ctrl_limit)
         action[2] = np.clip(action[2], 0.0, 1.0)
 
-        self.data.ctrl[self._actuator_ids.get("tvc_pitch", 0)] = action[0] / max(self._ctrl_limit, 1e-6)
-        self.data.ctrl[self._actuator_ids.get("tvc_yaw", 1)] = action[1] / max(self._ctrl_limit, 1e-6)
-        self.data.ctrl[self._actuator_ids.get("thrust_control", 2)] = action[2]
+        # Actuator delay simulation (realistic hardware delay)
+        if self._actuator_delay_steps > 0:
+            # Add new action to buffer
+            self._action_buffer.append(action.copy())
+            # Remove oldest action
+            if len(self._action_buffer) > self._actuator_delay_steps + 1:
+                self._action_buffer.pop(0)
+            # Use delayed action
+            delayed_action = self._action_buffer[0]
+        else:
+            delayed_action = action
+
+        self.data.ctrl[self._actuator_ids.get("tvc_pitch", 0)] = delayed_action[0] / max(self._ctrl_limit, 1e-6)
+        self.data.ctrl[self._actuator_ids.get("tvc_yaw", 1)] = delayed_action[1] / max(self._ctrl_limit, 1e-6)
+        self.data.ctrl[self._actuator_ids.get("thrust_control", 2)] = delayed_action[2]
 
         for _ in range(self.frame_skip):
             # Apply wind disturbance force if domain randomization enabled
@@ -325,11 +342,23 @@ class TvcEnv:
         # Smoothness: Reduce jerk
         smoothness_reward = 2.0 / (1.0 + control_jerk)
 
+        # Progress reward: Reward getting closer to target over time
+        if not hasattr(self, '_prev_pos_error'):
+            self._prev_pos_error = pos_error
+        progress_reward = 2.0 * max(0.0, self._prev_pos_error - pos_error)  # Positive if improving
+        self._prev_pos_error = pos_error
+
+        # Stability reward: Reward maintaining stable hover
+        if pos_error < 5.0 and vel_error < 2.0:
+            stability_reward = 3.0  # Bonus for being in stable region
+        else:
+            stability_reward = 0.0
+
         # Fuel efficiency: REMOVED for hover task (conflicts with maintaining altitude)
         # Hover requires sustained thrust near 1.0, penalizing it is counterproductive
         fuel_reward = 0.0  # Disabled
 
-        # Combined reward (unnormalized, scales ~0-33)
+        # Combined reward (unnormalized, scales ~0-40 with shaping)
         reward = (
             pos_reward +
             vel_reward +
@@ -337,6 +366,8 @@ class TvcEnv:
             omega_reward +
             altitude_reward +
             smoothness_reward +
+            progress_reward +
+            stability_reward +
             fuel_reward
         )
 
