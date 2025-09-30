@@ -98,6 +98,19 @@ python -m tvc train --episodes 100 --seed 42
 
 When recording videos in a headless environment (e.g. Kaggle, CI), set `MUJOCO_GL=egl` before launching Python so MuJoCo can create an offscreen context.
 
+### Record a quick demo video
+
+To render a five-second evaluation clip without running a full training job, use the helper script:
+
+```powershell
+# Optional: ensure MuJoCo can render offscreen
+$env:MUJOCO_GL = "egl"
+
+python scripts/record_demo.py
+```
+
+The script drops the MP4 under `training/demo-videos/` and prints the exact path when it finishes. It also sets `TVC_ASSET_PATH` automatically when the repository’s `assets/tvc_2d.xml` is available.
+
 ### Training defaults
 
 The training stack now includes stability-oriented defaults:
@@ -116,7 +129,6 @@ The training stack now includes stability-oriented defaults:
 
 - `--learning-rate`, `--entropy-coef`, `--reward-scale`, `--rollout-length` override the PPO loop.
 - `--policy-weight`, `--mpc-weight`, `--policy-warmup-weight`, `--mpc-warmup-weight`, `--blend-transition-episodes`, `--no-progressive-blend` control the MPC/policy blend schedule.
-- `--record-video` captures a post-training evaluation rollout (and on KeyboardInterrupt) using MuJoCo RGB frames. Tune resolution with `--video-width` / `--video-height` and duration with `--video-length`.
 - Existing plateau-management flags still apply; combine them to experiment with different LR reduction strategies.
 
 Each training invocation now creates a timestamped run directory under `training/` by default, e.g. `training/run-2025-09-24-04-30PM/`. The folder contains:
@@ -129,7 +141,6 @@ Each training invocation now creates a timestamped run directory under `training
 - `policy_elite_best.msgpack` – the highest-scoring elite retained by the evolutionary phase (when available).
 - `observation_normalizer.npz` – running mean/variance statistics for normalising observations at inference time.
 - `policy_metadata.json` – handy metadata describing the best recorded episode and learning-rate state.
-- `videos/` – optional MP4s captured with `--record-video`, suitable for headless notebooks (requires `gymnasium` + `imageio-ffmpeg`).
 
 Pass `--output-root` to change the base directory or `--run-tag` to supply a custom run name. The new warmup cosine learning-rate schedule can be disabled with `--no-lr-schedule` if desired.
 
