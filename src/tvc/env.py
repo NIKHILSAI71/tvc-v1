@@ -34,7 +34,7 @@ class TvcEnv:
         self,
         model_path: str | None = None,
         dt: float = 0.02,
-        ctrl_limit: float = 0.3,
+        ctrl_limit: float = 0.14,  # Real F9 gimbal limit: ±8° = 0.14 rad
         max_steps: int = 2000,
         seed: int | None = None,
     ) -> None:
@@ -59,13 +59,13 @@ class TvcEnv:
         self._last_action = np.zeros(3, dtype=np.float64)
         self._prev_action = np.zeros(3, dtype=np.float64)
 
-        # Stage configuration
+        # Stage configuration - Realistic landing scenario altitudes
         self._stage_config = {
-            "target_position": [0.0, 0.0, 8.0],
+            "target_position": [0.0, 0.0, 50.0],  # Start from 50m hover
             "target_orientation": [1.0, 0.0, 0.0, 0.0],
             "target_velocity": [0.0, 0.0, 0.0],
             "target_angular_velocity": [0.0, 0.0, 0.0],
-            "initial_position": [0.0, 0.0, 8.0],
+            "initial_position": [0.0, 0.0, 50.0],
             "initial_velocity": [0.0, 0.0, 0.0],
             "initial_orientation": [1.0, 0.0, 0.0, 0.0],
             "initial_angular_velocity": [0.0, 0.0, 0.0],
@@ -144,11 +144,11 @@ class TvcEnv:
         initial_quat = np.array(self._stage_config["initial_orientation"], dtype=np.float64)
         initial_omega = np.array(self._stage_config["initial_angular_velocity"], dtype=np.float64)
 
-        # Add noise
-        pos_noise = self._rng.normal(0.0, 0.4, 3)
-        vel_noise = self._rng.normal(0.0, 0.2, 3)
-        quat_noise = self._rng.normal(0.0, 0.05, 4)
-        omega_noise = self._rng.normal(0.0, 0.1, 3)
+        # Add realistic sensor noise (GPS: ±2cm, IMU: ±0.01 m/s, gyro: ±0.02 rad/s)
+        pos_noise = self._rng.normal(0.0, 0.02, 3)  # ±2cm GPS accuracy
+        vel_noise = self._rng.normal(0.0, 0.01, 3)  # ±1cm/s IMU accuracy
+        quat_noise = self._rng.normal(0.0, 0.01, 4)  # ±0.01 orientation noise
+        omega_noise = self._rng.normal(0.0, 0.02, 3)  # ±0.02 rad/s gyro accuracy
 
         quat = initial_quat + quat_noise
         quat = quat / np.linalg.norm(quat)
@@ -208,7 +208,16 @@ class TvcEnv:
         return np.asarray(observation, dtype=np.float32)
 
     def _compute_reward(self, action: np.ndarray) -> float:
-        """Compute reward."""
+        """Compute reward with proper scaling for realistic rocket control.
+
+        Reward components:
+        - Position error: Heavily penalized (most important for landing)
+        - Velocity error: Penalized to encourage smooth motion
+        - Orientation: Must stay upright (quaternion alignment)
+        - Angular velocity: Penalize spinning
+        - Control smoothness: Reduce jerk
+        - Fuel efficiency: Encourage throttle management
+        """
         pos = self.data.qpos[0:3]
         vel = self.data.qvel[0:3]
         quat = self.data.qpos[3:7]
@@ -217,31 +226,63 @@ class TvcEnv:
         target_pos = np.asarray(self._stage_config["target_position"], dtype=np.float64)
         target_vel = np.asarray(self._stage_config["target_velocity"], dtype=np.float64)
 
+        # Distance errors (scaled for 50m altitude range)
         pos_error = np.linalg.norm(pos - target_pos)
         vel_error = np.linalg.norm(vel - target_vel)
+
+        # Orientation alignment (quaternion dot product close to 1.0 = aligned)
         target_quat = np.array([1.0, 0.0, 0.0, 0.0])
         orient_alignment = np.abs(np.dot(quat, target_quat))
-        omega_penalty = np.exp(-0.5 * np.linalg.norm(omega))
-        smoothness_reward = np.exp(-2.0 * np.linalg.norm(action - self._last_action))
-        fuel_efficiency = 1.0 - 0.3 * action[2]
 
+        # Angular velocity magnitude (want this small)
+        omega_magnitude = np.linalg.norm(omega)
+
+        # Control smoothness (jerk penalty)
+        control_jerk = np.linalg.norm(action - self._last_action)
+
+        # Reward components (scaled appropriately for real physics)
+        # Position: Critical - use inverse quadratic (sharper penalty near target)
+        pos_reward = 10.0 / (1.0 + pos_error**2)
+
+        # Velocity: Important - use inverse linear
+        vel_reward = 5.0 / (1.0 + vel_error)
+
+        # Orientation: Critical - reward alignment
+        orient_reward = 8.0 * (orient_alignment**4)  # Sharp reward for staying upright
+
+        # Angular velocity: Penalize spinning
+        omega_reward = 3.0 / (1.0 + omega_magnitude**2)
+
+        # Smoothness: Reduce jerk
+        smoothness_reward = 2.0 / (1.0 + control_jerk)
+
+        # Fuel efficiency: Mild penalty for high throttle
+        fuel_reward = 1.0 * (1.0 - 0.2 * action[2])
+
+        # Combined reward (unnormalized, scales ~0-30)
         reward = (
-            0.4 * np.exp(-2.0 * pos_error)
-            + 0.2 * np.exp(-1.0 * vel_error)
-            + 0.2 * orient_alignment**2
-            + 0.1 * omega_penalty
-            + 0.05 * smoothness_reward
-            + 0.05 * fuel_efficiency
+            pos_reward +
+            vel_reward +
+            orient_reward +
+            omega_reward +
+            smoothness_reward +
+            fuel_reward
         )
 
+        # Bonus for being within tolerance (achieving goal)
         if (
             pos_error < self._stage_config["position_tolerance"]
             and vel_error < self._stage_config["velocity_tolerance"]
+            and orient_alignment > 0.95
         ):
-            reward += self._stage_config["tolerance_bonus"]
+            reward += 15.0  # Large bonus for goal achievement
 
-        normalised, _ = self._normalise_reward(reward)
-        return normalised
+        # Crash penalty
+        if pos[2] < 0.2:
+            reward -= 20.0
+
+        # Don't normalize - let PPO learn the scale naturally
+        return float(reward)
 
     def _normalise_reward(self, value: float) -> tuple[float, float]:
         """Welford's online algorithm for reward normalization."""
@@ -261,11 +302,13 @@ class TvcEnv:
         return normalised, std
 
     def _check_termination(self) -> bool:
-        """Check episode termination."""
+        """Check episode termination - Realistic landing bounds."""
         pos = self.data.qpos[0:3]
-        if pos[2] < 0.1 or pos[2] > 25.0:
+        # Terminate if crashed (below 0.1m) or exceeded max altitude (200m)
+        if pos[2] < 0.1 or pos[2] > 200.0:
             return True
-        if np.linalg.norm(pos[0:2]) > 15.0:
+        # Terminate if drifted too far laterally (50m radius)
+        if np.linalg.norm(pos[0:2]) > 50.0:
             return True
         if self._step_counter >= self.max_steps:
             return True
