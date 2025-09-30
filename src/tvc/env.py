@@ -1,439 +1,250 @@
-"""Environment utilities for the 2D thrust-vector-control research platform.
+"""Production 3D TVC environment with MuJoCo."""
 
-This module exposes a lightweight MuJoCo wrapper that keeps the vehicle within a
-2D plane while enabling accurate rigid-body dynamics. It also provides helpers
-for interacting with the MJX GPU-accelerated backend so that large training
-batches can be simulated efficiently when curriculum schedules demand many
-parallel scenarios.
-"""
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, Tuple, TYPE_CHECKING, TypeAlias, cast
-
+import logging
 import math
 import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict
 
-import mujoco as _mujoco
+import jax.numpy as jnp
+import mujoco
 import numpy as np
-import gymnasium as gym
-from gymnasium import spaces
-from mujoco import mjx
 
-from .dynamics import RocketParams
+from .dynamics import RocketParams, state_to_observation
 
-if TYPE_CHECKING:  # pragma: no cover - typing aid
-    from .curriculum import CurriculumStage
-    from mujoco import Renderer as MujocoRenderer
-else:  # pragma: no cover - runtime alias for typing-only import
-    MujocoRenderer: TypeAlias = Any
-
-mujoco: Any = _mujoco
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
 class StepResult:
-    """Container for simulation feedback produced by :class:`Tvc2DEnv`.
-
-    Args:
-        observation: Vector fed into control policies (thrust, angle, angular rate).
-        reward: Scalar reward promoting stable, smooth flight.
-        done: Boolean terminating flag for curriculum rollouts.
-        info: Extra diagnostics (e.g., jerk metrics, constraint residuals).
-    """
-
+    """Environment step output."""
     observation: np.ndarray
     reward: float
     done: bool
     info: Dict[str, float]
 
 
-class Tvc2DEnv:
-    """MuJoCo-backed planar rocket environment with thrust vector control.
-
-    Args:
-        model_path: Path to the MJCF model. Defaults to the packaged ``assets/tvc_2d.xml``.
-        dt: Integration step used when aggregating multiple MuJoCo sub-steps per RL step.
-        ctrl_limit: Maximum absolute displacement (meters) for the TVC carriage on each axis.
-        max_steps: Safety guard for truncating long episodes when curriculum resets are needed.
-        seed: Seed for the local RNG injected into disturbance sampling.
-    """
+class TvcEnv:
+    """3D TVC Rocket Environment with MuJoCo physics."""
 
     def __init__(
         self,
         model_path: str | None = None,
         dt: float = 0.02,
-        ctrl_limit: float = 0.28,
+        ctrl_limit: float = 0.3,
         max_steps: int = 2000,
         seed: int | None = None,
     ) -> None:
         asset_path = model_path or _default_asset_path()
         self.model = mujoco.MjModel.from_xml_path(asset_path)
         self.data = mujoco.MjData(self.model)
-        self.ctrl_limit = float(ctrl_limit)
+
+        self._ctrl_limit = float(ctrl_limit)
         self.frame_skip = max(int(dt / self.model.opt.timestep), 1)
         self.max_steps = int(max_steps)
         self._rng = np.random.default_rng(seed)
         self._step_counter = 0
-        # Reward statistics for on-the-fly normalisation.
+
+        # Reward normalization
         self._reward_count = 0.0
         self._reward_mean = 0.0
         self._reward_m2 = 0.0
         self._reward_norm_warmup = 64
         self._reward_norm_clip = 6.0
+
+        # Action tracking
+        self._last_action = np.zeros(3, dtype=np.float64)
+        self._prev_action = np.zeros(3, dtype=np.float64)
+
+        # Stage configuration
         self._stage_config = {
-            "target_altitude": 4.0,
-            "target_pitch": 0.0,
-            "target_vertical_velocity": 0.0,
-            "target_lateral": 0.0,
-            "phase": "hover",
-            "initial_altitude": None,
-            "initial_vertical_velocity": 0.0,
-            "initial_pitch": 0.0,
-            "initial_pitch_rate": 0.0,
-            "initial_lateral": 0.0,
-            "initial_lateral_velocity": 0.0,
-            "pitch_tolerance": 0.12,
-            "pitch_rate_tolerance": 0.45,
-            "altitude_tolerance": 0.5,
-            "vertical_velocity_tolerance": 0.6,
-            "lateral_tolerance": 0.6,
-            "lateral_velocity_tolerance": 0.6,
-            "tolerance_bonus": 0.45,
+            "target_position": [0.0, 0.0, 8.0],
+            "target_orientation": [1.0, 0.0, 0.0, 0.0],
+            "target_velocity": [0.0, 0.0, 0.0],
+            "target_angular_velocity": [0.0, 0.0, 0.0],
+            "initial_position": [0.0, 0.0, 8.0],
+            "initial_velocity": [0.0, 0.0, 0.0],
+            "initial_orientation": [1.0, 0.0, 0.0, 0.0],
+            "initial_angular_velocity": [0.0, 0.0, 0.0],
+            "position_tolerance": 1.0,
+            "velocity_tolerance": 0.8,
+            "orientation_tolerance": 0.2,
+            "angular_velocity_tolerance": 0.5,
+            "tolerance_bonus": 0.6,
         }
+
+        self._actuator_ids: Dict[str, int] = {}
+        self._resolve_actuators()
         mujoco.mj_forward(self.model, self.data)
 
-    # ---------------------------------------------------------------------
-    # Stage configuration helpers
-    # ---------------------------------------------------------------------
+    @property
+    def ctrl_limit(self) -> float:
+        """Get control limit."""
+        return self._ctrl_limit
 
-    def configure_stage(self, stage: "CurriculumStage") -> None:
-        """Applies curriculum-specific targets and initial conditions."""
+    def _resolve_actuators(self) -> None:
+        """Find actuator IDs."""
+        self._actuator_ids = {}
+        for key in ("tvc_pitch", "tvc_yaw", "thrust_control"):
+            try:
+                idx = int(mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, key))
+                self._actuator_ids[key] = idx
+            except Exception:
+                self._actuator_ids[key] = -1
 
-        stage_dict: Dict[str, Any] = {
-            "target_altitude": float(getattr(stage, "target_altitude", 4.0)),
-            "target_pitch": float(getattr(stage, "target_pitch", 0.0)),
-            "target_vertical_velocity": float(getattr(stage, "target_vertical_velocity", 0.0)),
-            "target_lateral": float(getattr(stage, "target_lateral", 0.0)),
-            "phase": getattr(stage, "phase", "hover"),
-            "initial_altitude": getattr(stage, "initial_altitude", None),
-            "initial_vertical_velocity": float(getattr(stage, "initial_vertical_velocity", 0.0)),
-            "initial_pitch": float(getattr(stage, "initial_pitch", 0.0)),
-            "initial_pitch_rate": float(getattr(stage, "initial_pitch_rate", 0.0)),
-            "initial_lateral": float(getattr(stage, "initial_lateral", 0.0)),
-            "initial_lateral_velocity": float(getattr(stage, "initial_lateral_velocity", 0.0)),
-            "pitch_tolerance": float(getattr(stage, "pitch_tolerance", 0.12)),
-            "pitch_rate_tolerance": float(getattr(stage, "pitch_rate_tolerance", 0.45)),
-            "altitude_tolerance": float(getattr(stage, "altitude_tolerance", 0.5)),
-            "vertical_velocity_tolerance": float(getattr(stage, "vertical_velocity_tolerance", 0.6)),
-            "lateral_tolerance": float(getattr(stage, "lateral_tolerance", 0.6)),
-            "lateral_velocity_tolerance": float(getattr(stage, "lateral_velocity_tolerance", 0.6)),
-            "tolerance_bonus": float(getattr(stage, "tolerance_bonus", 0.45)),
-        }
-        self._stage_config.update(stage_dict)
+    def configure_stage(self, stage) -> None:
+        """Apply curriculum stage configuration."""
+        self._stage_config.update({
+            "target_position": list(getattr(stage, "target_position", [0.0, 0.0, 8.0])),
+            "target_orientation": list(getattr(stage, "target_orientation", [1.0, 0.0, 0.0, 0.0])),
+            "target_velocity": list(getattr(stage, "target_velocity", [0.0, 0.0, 0.0])),
+            "target_angular_velocity": list(getattr(stage, "target_angular_velocity", [0.0, 0.0, 0.0])),
+            "initial_position": list(getattr(stage, "initial_position", [0.0, 0.0, 8.0])),
+            "initial_velocity": list(getattr(stage, "initial_velocity", [0.0, 0.0, 0.0])),
+            "initial_orientation": list(getattr(stage, "initial_orientation", [1.0, 0.0, 0.0, 0.0])),
+            "initial_angular_velocity": list(getattr(stage, "initial_angular_velocity", [0.0, 0.0, 0.0])),
+            "position_tolerance": float(getattr(stage, "position_tolerance", 1.0)),
+            "velocity_tolerance": float(getattr(stage, "velocity_tolerance", 0.8)),
+            "orientation_tolerance": float(getattr(stage, "orientation_tolerance", 0.2)),
+            "angular_velocity_tolerance": float(getattr(stage, "angular_velocity_tolerance", 0.5)),
+            "tolerance_bonus": float(getattr(stage, "tolerance_bonus", 0.6)),
+        })
 
     def apply_rocket_params(self, params: RocketParams | None) -> None:
-        """Reconfigures the MuJoCo model to match supplied physical parameters."""
-
+        """Update physics parameters."""
         if params is None:
             return
 
-        mjt_obj = getattr(mujoco, "mjtObj")
-        vehicle_id = int(mujoco.mj_name2id(self.model, mjt_obj.mjOBJ_BODY, "vehicle"))
+        vehicle_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "vehicle")
         if vehicle_id >= 0:
             self.model.body_mass[vehicle_id] = params.mass
-            inertia = np.array([
-                max(params.inertia, 1e-3),
-                max(params.inertia, 1e-3),
-                max(params.inertia * 0.5, 1e-3),
+            self.model.body_inertia[vehicle_id] = np.array([
+                max(params.inertia[0], 1e-3),
+                max(params.inertia[1], 1e-3),
+                max(params.inertia[2], 1e-3),
             ])
-            self.model.body_inertia[vehicle_id] = inertia
 
-        gravity = np.array([0.0, 0.0, -params.gravity], dtype=np.float64)
-        self.model.opt.gravity[:] = gravity
+        self.model.opt.gravity[:] = [0.0, 0.0, -params.gravity]
 
-        joint_limit = min(self.ctrl_limit, max(params.arm * 0.25, 0.05))
-        for joint_name in ("tvc_x", "tvc_y"):
-            joint_id = int(mujoco.mj_name2id(self.model, mjt_obj.mjOBJ_JOINT, joint_name))
+        for joint in ("tvc_x", "tvc_y"):
+            joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, joint)
             if joint_id >= 0:
-                self.model.jnt_range[joint_id] = np.array([-joint_limit, joint_limit])
-        self.ctrl_limit = float(joint_limit)
-        mujoco.mj_forward(self.model, self.data)
+                self.model.jnt_range[joint_id] = [-params.tvc_limit, params.tvc_limit]
 
-    def reset(self, disturbance_scale: float = 1.0) -> np.ndarray:
-        """Reinitialises the simulation state with configurable disturbances.
-
-        Args:
-            disturbance_scale: Amplitude applied to random attitude and velocity perturbations.
-
-        Returns:
-            Observation vector used as the initial input for the controller.
-        """
-
-        mujoco.mj_resetData(self.model, self.data)
-        # Initial altitude and alignment.
-        config = self._stage_config
-        base_altitude = config.get("initial_altitude")
-        base_altitude = 3.5 if base_altitude is None else float(base_altitude)
-        self.data.qpos[2] = base_altitude
-        self.data.qvel[:] = 0.0
-
-        base_vertical_velocity = float(config.get("initial_vertical_velocity", 0.0))
-        self.data.qvel[2] = base_vertical_velocity
-
-        # Inject bounded disturbances to mimic pre-launch uncertainties.
-        base_pitch = float(config.get("initial_pitch", 0.0))
-        angle_noise = self._rng.normal(0.0, 0.02 * disturbance_scale)
-        mujoco.mju_axisAngle2Quat(
-            self.data.qpos[3:7], np.array([1.0, 0.0, 0.0]), base_pitch + angle_noise
-        )
-        base_pitch_rate = float(config.get("initial_pitch_rate", 0.0))
-        self.data.qvel[3] = self._rng.normal(0.0, 0.5 * disturbance_scale)
-        self.data.qvel[4] = base_pitch_rate + self._rng.normal(0.0, 0.5 * disturbance_scale)
-        self.data.qvel[5] = self._rng.normal(0.0, 0.5 * disturbance_scale)
-
-        # Random lateral offsets.
-        base_lateral = float(config.get("initial_lateral", 0.0))
-        base_lateral_velocity = float(config.get("initial_lateral_velocity", 0.0))
-        self.data.qpos[0] = base_lateral + self._rng.normal(0.0, 0.3 * disturbance_scale)
-        self.data.qvel[0] = base_lateral_velocity + self._rng.normal(0.0, 0.5 * disturbance_scale)
-        self.data.qvel[2] += self._rng.normal(0.0, 0.4 * disturbance_scale)
-
-        mujoco.mj_forward(self.model, self.data)
+    def reset(self) -> np.ndarray:
+        """Reset environment."""
         self._step_counter = 0
+        mujoco.mj_resetData(self.model, self.data)
+
+        initial_pos = np.array(self._stage_config["initial_position"], dtype=np.float64)
+        initial_vel = np.array(self._stage_config["initial_velocity"], dtype=np.float64)
+        initial_quat = np.array(self._stage_config["initial_orientation"], dtype=np.float64)
+        initial_omega = np.array(self._stage_config["initial_angular_velocity"], dtype=np.float64)
+
+        # Add noise
+        pos_noise = self._rng.normal(0.0, 0.4, 3)
+        vel_noise = self._rng.normal(0.0, 0.2, 3)
+        quat_noise = self._rng.normal(0.0, 0.05, 4)
+        omega_noise = self._rng.normal(0.0, 0.1, 3)
+
+        quat = initial_quat + quat_noise
+        quat = quat / np.linalg.norm(quat)
+
+        self.data.qpos[0:3] = initial_pos + pos_noise
+        self.data.qpos[3:7] = quat
+        self.data.qvel[0:3] = initial_vel + vel_noise
+        self.data.qvel[3:6] = initial_omega + omega_noise
+        self.data.ctrl[:] = 0.0
+
+        mujoco.mj_forward(self.model, self.data)
+
+        self._last_action[:] = 0.0
+        self._prev_action[:] = 0.0
+
         return self._get_observation()
 
-    def step(self, action: np.ndarray, thrust_command: float | None = None) -> StepResult:
-        """Steps the environment using planar TVC offsets.
+    def step(self, action: np.ndarray) -> StepResult:
+        """Execute action."""
+        self._step_counter += 1
+        action = np.asarray(action, dtype=np.float64)
+        if action.shape != (3,):
+            raise ValueError("Action must have shape (3,)")
 
-        Args:
-            action: Array ``[x, y]`` specifying the lateral displacement of the nozzle (meters).
-            thrust_command: Optional scalar throttle command (0–1). When omitted a hover-hold
-                controller modulates thrust to stabilise altitude and pitch.
+        action = action.copy()
+        action[0] = np.clip(action[0], -self._ctrl_limit, self._ctrl_limit)
+        action[1] = np.clip(action[1], -self._ctrl_limit, self._ctrl_limit)
+        action[2] = np.clip(action[2], 0.0, 1.0)
 
-        Returns:
-            A :class:`StepResult` capturing policy inputs and physics-derived metrics.
-        """
+        self.data.ctrl[self._actuator_ids.get("tvc_pitch", 0)] = action[0] / max(self._ctrl_limit, 1e-6)
+        self.data.ctrl[self._actuator_ids.get("tvc_yaw", 1)] = action[1] / max(self._ctrl_limit, 1e-6)
+        self.data.ctrl[self._actuator_ids.get("thrust_control", 2)] = action[2]
 
-        assert action.shape == (2,), "Action must provide x and y offsets."
-        ctrl = self.data.ctrl
-        ctrl[1:3] = np.clip(action, -self.ctrl_limit, self.ctrl_limit)
-
-        if thrust_command is None:
-            ctrl[0] = self._hover_thrust()
-        else:
-            ctrl[0] = float(np.clip(thrust_command, -1.0, 1.0))
-
-        # Integrate using smaller MuJoCo steps for stability.
         for _ in range(self.frame_skip):
             mujoco.mj_step(self.model, self.data)
 
         observation = self._get_observation()
-        reward, info = self._reward()
-        self._step_counter += 1
+        reward = self._compute_reward(action)
+        done = self._check_termination()
+        info = self._get_info(action)
 
-        done = bool(
-            self._step_counter >= self.max_steps
-            or self.data.qpos[2] < 0.5
-            or abs(self._pitch()) > 0.6
-        )
-        return StepResult(observation=observation, reward=reward, done=done, info=info)
+        self._prev_action = self._last_action.copy()
+        self._last_action = action.copy()
 
-    def mjx_state(self) -> Tuple[mjx.Model, mjx.Data]:
-        """Exports an MJX-ready model/data pair anchored to the current MuJoCo state."""
-
-        mjx_model = mjx.put_model(self.model)
-        mjx_data = mjx.make_data(mjx_model)
-        mjx_data = mjx_data.replace(
-            qpos=np.array(self.data.qpos),
-            qvel=np.array(self.data.qvel),
-            ctrl=np.array(self.data.ctrl),
-        )
-        return mjx_model, mjx_data
-
-    def _hover_thrust(self) -> float:
-        height_error = 4.0 - float(self.data.qpos[2])
-        vertical_vel = float(self.data.qvel[2])
-        pitch_error = self._pitch()
-        pitch_rate = self._pitch_rate()
-        # Simple PD to keep the rocket upright and hovering.
-        thrust = 0.6 + 0.08 * height_error - 0.015 * vertical_vel - 0.4 * pitch_error - 0.03 * pitch_rate
-        return float(np.clip(thrust, -1.0, 1.0))
+        return StepResult(observation=observation, reward=float(reward), done=bool(done), info=info)
 
     def _get_observation(self) -> np.ndarray:
-        thrust = float(self.data.ctrl[0])
-        pitch = self._pitch()
-        pitch_rate = self._pitch_rate()
-        config = self._stage_config
-        pitch_tolerance = max(float(config.get("pitch_tolerance", 0.12)), 1e-6)
-        pitch_rate_tol = max(float(config.get("pitch_rate_tolerance", 0.45)), 1e-6)
-        lateral_tolerance = max(float(config.get("lateral_tolerance", 0.6)), 1e-6)
-        lateral_vel_tol = max(float(config.get("lateral_velocity_tolerance", 0.6)), 1e-6)
-        altitude_tolerance = max(float(config.get("altitude_tolerance", 0.5)), 1e-6)
-        vertical_vel_tol = max(float(config.get("vertical_velocity_tolerance", 0.6)), 1e-6)
+        """Get policy observation."""
+        state_np = np.concatenate([
+            self.data.qpos[0:3],
+            self.data.qvel[0:3],
+            self.data.qpos[3:7],
+            self.data.qvel[3:6],
+        ])
+        state_jnp = jnp.asarray(state_np, dtype=jnp.float32)
+        observation = state_to_observation(state_jnp)
+        return np.asarray(observation, dtype=np.float32)
 
-        target_pitch = float(config.get("target_pitch", 0.0))
-        target_altitude = float(config.get("target_altitude", 4.0))
-        target_lateral = float(config.get("target_lateral", 0.0))
-        target_vertical_vel = float(config.get("target_vertical_velocity", 0.0))
+    def _compute_reward(self, action: np.ndarray) -> float:
+        """Compute reward."""
+        pos = self.data.qpos[0:3]
+        vel = self.data.qvel[0:3]
+        quat = self.data.qpos[3:7]
+        omega = self.data.qvel[3:6]
 
-        lateral = float(self.data.qpos[0])
-        lateral_error = lateral - target_lateral
-        lateral_vel = float(self.data.qvel[0])
-        altitude = float(self.data.qpos[2])
-        altitude_error = target_altitude - altitude
-        vertical_vel = float(self.data.qvel[2])
-        vertical_vel_error = vertical_vel - target_vertical_vel
-        pitch_error = pitch - target_pitch
+        target_pos = np.asarray(self._stage_config["target_position"], dtype=np.float64)
+        target_vel = np.asarray(self._stage_config["target_velocity"], dtype=np.float64)
 
-        return np.array(
-            [
-                thrust,
-                pitch_error / pitch_tolerance,
-                pitch_rate / pitch_rate_tol,
-                lateral_error / lateral_tolerance,
-                lateral_vel / lateral_vel_tol,
-                altitude_error / altitude_tolerance,
-                vertical_vel_error / vertical_vel_tol,
-            ],
-            dtype=np.float32,
+        pos_error = np.linalg.norm(pos - target_pos)
+        vel_error = np.linalg.norm(vel - target_vel)
+        target_quat = np.array([1.0, 0.0, 0.0, 0.0])
+        orient_alignment = np.abs(np.dot(quat, target_quat))
+        omega_penalty = np.exp(-0.5 * np.linalg.norm(omega))
+        smoothness_reward = np.exp(-2.0 * np.linalg.norm(action - self._last_action))
+        fuel_efficiency = 1.0 - 0.3 * action[2]
+
+        reward = (
+            0.4 * np.exp(-2.0 * pos_error)
+            + 0.2 * np.exp(-1.0 * vel_error)
+            + 0.2 * orient_alignment**2
+            + 0.1 * omega_penalty
+            + 0.05 * smoothness_reward
+            + 0.05 * fuel_efficiency
         )
 
-    def _pitch(self) -> float:
-        quat = np.array(self.data.qpos[3:7])
-        qw, qx, qy, qz = quat
-        sin_pitch = 2.0 * (qw * qy - qz * qx)
-        sin_pitch = np.clip(sin_pitch, -1.0, 1.0)
-        return float(np.arcsin(sin_pitch))
+        if (
+            pos_error < self._stage_config["position_tolerance"]
+            and vel_error < self._stage_config["velocity_tolerance"]
+        ):
+            reward += self._stage_config["tolerance_bonus"]
 
-    def _pitch_rate(self) -> float:
-        # Angular velocity around Y-axis.
-        return float(self.data.qvel[4])
+        normalised, _ = self._normalise_reward(reward)
+        return normalised
 
-    def _reward(self) -> Tuple[float, Dict[str, float]]:
-        config = self._stage_config
-        target_pitch = float(config.get("target_pitch", 0.0))
-        target_altitude = float(config.get("target_altitude", 4.0))
-        target_vertical_velocity = float(config.get("target_vertical_velocity", 0.0))
-        target_lateral = float(config.get("target_lateral", 0.0))
-
-        pitch = self._pitch()
-        pitch_error = pitch - target_pitch
-        pitch_rate = self._pitch_rate()
-        lateral = float(self.data.qpos[0]) - target_lateral
-        lateral_vel = float(self.data.qvel[0])
-        altitude = float(self.data.qpos[2])
-        altitude_error = target_altitude - altitude
-        vertical_vel_raw = float(self.data.qvel[2])
-        vertical_vel_error = vertical_vel_raw - target_vertical_velocity
-        jerk = float(np.linalg.norm(self.data.qacc[:3]))
-        ctrl_jitter = float(np.linalg.norm(np.diff(self.data.ctrl)))
-        ctrl_magnitude = float(np.linalg.norm(self.data.ctrl[1:3]))
-
-        pitch_scale = max(float(config.get("pitch_tolerance", 0.12)), 1e-6)
-        pitch_rate_scale = max(float(config.get("pitch_rate_tolerance", 0.45)), 1e-6)
-        lateral_scale = max(float(config.get("lateral_tolerance", 0.6)), 1e-6)
-        lateral_vel_scale = max(float(config.get("lateral_velocity_tolerance", 0.6)), 1e-6)
-        altitude_scale = max(float(config.get("altitude_tolerance", 0.5)), 1e-6)
-        vertical_scale = max(float(config.get("vertical_velocity_tolerance", 0.6)), 1e-6)
-
-        def _exp_penalty(value: float, scale: float) -> float:
-            return 1.0 - math.exp(-abs(value) / scale)
-
-        penalty = (
-            0.42 * _exp_penalty(pitch_error, pitch_scale)
-            + 0.18 * _exp_penalty(pitch_rate, pitch_rate_scale)
-            + 0.22 * _exp_penalty(lateral, lateral_scale)
-            + 0.16 * _exp_penalty(lateral_vel, lateral_vel_scale)
-            + 0.32 * _exp_penalty(altitude_error, altitude_scale)
-            + 0.24 * _exp_penalty(vertical_vel_error, vertical_scale)
-            + 0.05 * _exp_penalty(jerk, 18.0)
-            + 0.04 * _exp_penalty(ctrl_jitter, 0.18)
-            + 0.03 * _exp_penalty(ctrl_magnitude, 0.2)
-        )
-
-        stability_bonus = float(
-            0.35
-            * math.exp(-0.5 * ((pitch_error / max(pitch_scale * 0.8, 1e-6)) ** 2 + (lateral / max(lateral_scale * 0.8, 1e-6)) ** 2))
-        )
-        hover_bonus = float(
-            0.25
-            * math.exp(
-                -0.5
-                * (
-                    (altitude_error / max(altitude_scale * 0.75, 1e-6)) ** 2
-                    + (vertical_vel_error / max(vertical_scale * 0.8, 1e-6)) ** 2
-                )
-            )
-        )
-        attitude_bonus = float(0.22 * math.exp(-0.5 * (pitch_rate / max(pitch_rate_scale * 0.8, 1e-6)) ** 2))
-        action_bonus = float(0.12 * math.exp(-0.5 * (ctrl_magnitude / 0.18) ** 2))
-
-        within_pitch = abs(pitch_error) <= pitch_scale
-        within_altitude = abs(altitude_error) <= altitude_scale
-        within_lateral = abs(lateral) <= lateral_scale
-        within_vertical = abs(vertical_vel_error) <= vertical_scale
-        tolerance_bonus = float(config.get("tolerance_bonus", 0.45)) if (
-            within_pitch and within_altitude and within_lateral and within_vertical
-        ) else 0.0
-
-        phase_bonus = 0.0
-        phase = config.get("phase", "hover")
-        if phase == "launch":
-            ascent_velocity = max(0.0, vertical_vel_raw - target_vertical_velocity)
-            phase_bonus = float(0.12 * math.tanh(ascent_velocity / max(vertical_scale, 1e-6)))
-        elif phase == "landing":
-            descent_error = abs(vertical_vel_error)
-            phase_bonus = float(0.1 * math.exp(-descent_error / max(vertical_scale, 1e-6)))
-        elif phase == "attitude":
-            phase_bonus = float(0.08 * math.exp(-abs(pitch_error) / max(pitch_scale * 0.6, 1e-6)))
-
-        raw_reward = (
-            1.2
-            - penalty
-            + stability_bonus
-            + hover_bonus
-            + attitude_bonus
-            + action_bonus
-            + phase_bonus
-            + tolerance_bonus
-        )
-        raw_reward = float(np.clip(raw_reward, -5.0, 3.0))
-        normalised_reward, reward_std = self._normalise_reward(raw_reward)
-
-        return normalised_reward, {
-            "pitch": pitch,
-            "pitch_error": pitch_error,
-            "pitch_rate": pitch_rate,
-            "lateral": lateral,
-            "lateral_vel": lateral_vel,
-            "altitude": altitude,
-            "altitude_error": altitude_error,
-            "vertical_velocity": vertical_vel_raw,
-            "vertical_velocity_error": vertical_vel_error,
-            "jerk": jerk,
-            "ctrl_jitter": ctrl_jitter,
-            "ctrl_magnitude": ctrl_magnitude,
-            "reward_penalty": penalty,
-            "stability_bonus": stability_bonus,
-            "hover_bonus": hover_bonus,
-            "attitude_bonus": attitude_bonus,
-            "action_bonus": action_bonus,
-            "phase_bonus": phase_bonus,
-            "tolerance_bonus": tolerance_bonus,
-            "raw_reward": raw_reward,
-            "reward_normalised": normalised_reward,
-            "reward_running_mean": self._reward_mean,
-            "reward_running_std": reward_std,
-            "target_pitch": target_pitch,
-            "target_altitude": target_altitude,
-            "target_vertical_velocity": target_vertical_velocity,
-            "pitch_tolerance": pitch_scale,
-            "altitude_tolerance": altitude_scale,
-            "vertical_velocity_tolerance": vertical_scale,
-        }
-
-    def _normalise_reward(self, value: float) -> Tuple[float, float]:
+    def _normalise_reward(self, value: float) -> tuple[float, float]:
+        """Welford's online algorithm for reward normalization."""
         self._reward_count += 1.0
         delta = value - self._reward_mean
         self._reward_mean += delta / self._reward_count
@@ -449,128 +260,47 @@ class Tvc2DEnv:
         normalised = float(np.clip(normalised, -self._reward_norm_clip, self._reward_norm_clip))
         return normalised, std
 
+    def _check_termination(self) -> bool:
+        """Check episode termination."""
+        pos = self.data.qpos[0:3]
+        if pos[2] < 0.1 or pos[2] > 25.0:
+            return True
+        if np.linalg.norm(pos[0:2]) > 15.0:
+            return True
+        if self._step_counter >= self.max_steps:
+            return True
+        return False
 
-class TvcGymnasiumEnv(gym.Env):
-    """Gymnasium-compatible wrapper around :class:`Tvc2DEnv` for video capture.
-
-    The wrapper exposes the MuJoCo environment with an RGB-array render mode so
-    Gymnasium utilities such as :class:`gymnasium.wrappers.RecordVideo` can
-    operate in headless sessions. Rendering is deferred until ``render`` is
-    called to avoid requiring an OpenGL context during regular interaction.
-    """
-
-    metadata = {"render_modes": ["rgb_array"], "render_fps": 50}
-
-    def __init__(
-        self,
-        *,
-        render_mode: str | None = None,
-        width: int = 640,
-        height: int = 360,
-        camera: str | None = None,
-        disturbance_scale: float = 1.0,
-        **env_kwargs: Any,
-    ) -> None:
-        super().__init__()
-        if render_mode not in (None, "rgb_array"):
-            raise ValueError(f"Unsupported render_mode={render_mode!r}; valid option is 'rgb_array'.")
-        self.render_mode = render_mode
-        self.base_env = Tvc2DEnv(**env_kwargs)
-        limit = float(self.base_env.ctrl_limit)
-        self.action_space = spaces.Box(low=-limit, high=limit, shape=(2,), dtype=np.float32)
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(7,), dtype=np.float32)
-        self._width = int(width)
-        self._height = int(height)
-        self._camera = camera
-        self._renderer: MujocoRenderer | None = None
-        self._default_disturbance = float(disturbance_scale)
-
-    def reset(self, *, seed: int | None = None, options: Dict[str, Any] | None = None):  # type: ignore[override]
-        if seed is not None:
-            self.base_env._rng = np.random.default_rng(seed)
-        disturbance = self._default_disturbance
-        if options and "disturbance_scale" in options:
-            disturbance = float(options["disturbance_scale"])
-        observation = self.base_env.reset(disturbance_scale=disturbance)
-        info: Dict[str, Any] = {"disturbance_scale": disturbance}
-        return observation.astype(np.float32), info
-
-    def step(self, action):  # type: ignore[override]
-        np_action = np.asarray(action, dtype=np.float32)
-        result = self.base_env.step(np_action)
-        observation = result.observation.astype(np.float32)
-        reward = float(result.reward)
-        terminated = bool(result.done)
-        truncated = False
-        info = dict(result.info)
-        if "raw_reward" not in info:
-            info["raw_reward"] = reward
-        return observation, reward, terminated, truncated, info
-
-    def render(self):  # type: ignore[override]
-        if self.render_mode != "rgb_array":
-            raise RuntimeError("render_mode must be 'rgb_array' to obtain frames")
-        renderer = self._renderer
-        if renderer is None:
-            renderer = mujoco.Renderer(self.base_env.model, height=self._height, width=self._width)
-            self._renderer = renderer
-        active_renderer = cast(MujocoRenderer, renderer)
-        try:
-            if self._camera is None:
-                active_renderer.update_scene(self.base_env.data)
-            else:
-                active_renderer.update_scene(self.base_env.data, self._camera)
-            return active_renderer.render()
-        except AttributeError:  # pragma: no cover - compatibility path for older mujoco builds
-            if self._camera is None:
-                return active_renderer.render(self.base_env.data)  # type: ignore[call-arg]
-            return active_renderer.render(self.base_env.data, self._camera)  # type: ignore[call-arg]
-
-    def close(self):
-        if self._renderer is not None:
-            self._renderer.close()
-            self._renderer = None
-        super().close()
+    def _get_info(self, action: np.ndarray) -> Dict[str, float]:
+        """Get diagnostic info."""
+        pos = self.data.qpos[0:3]
+        vel = self.data.qvel[0:3]
+        return {
+            "altitude": float(pos[2]),
+            "lateral_distance": float(np.linalg.norm(pos[0:2])),
+            "speed": float(np.linalg.norm(vel)),
+            "gimbal_x": float(action[0]),
+            "gimbal_y": float(action[1]),
+            "thrust_fraction": float(action[2]),
+            "episode_length": float(self._step_counter),
+        }
 
 
 def _default_asset_path() -> str:
-    from pathlib import Path
-
+    """Locate tvc_3d.xml asset."""
     env_path = os.environ.get("TVC_ASSET_PATH")
     if env_path:
         candidate = Path(env_path)
         if candidate.is_file():
             return str(candidate)
-        candidate_file = candidate / "tvc_2d.xml"
+        candidate_file = candidate / "tvc_3d.xml"
         if candidate_file.is_file():
             return str(candidate_file)
 
     origin = Path(__file__).resolve()
     for base in [origin.parent, *origin.parents]:
-        asset_path = base / "assets" / "tvc_2d.xml"
+        asset_path = base / "assets" / "tvc_3d.xml"
         if asset_path.is_file():
             return str(asset_path)
 
-    raise FileNotFoundError(
-        "Unable to locate tvc_2d.xml. Set TVC_ASSET_PATH to the file or containing directory."
-    )
-
-
-def make_mjx_batch(env: Tvc2DEnv, batch_size: int) -> Tuple[mjx.Model, mjx.Data]:
-    """Creates MJX buffers for batched rollouts that mirror the environment state.
-
-    Args:
-        env: Environment instance supplying the MuJoCo model.
-        batch_size: Number of parallel simulations to map via ``jax.vmap``.
-
-    Returns:
-        Tuple ``(mjx_model, mjx_data)`` representing the batched simulator.
-    """
-
-    mjx_model = mjx.put_model(env.model)
-    base_data = mjx.make_data(mjx_model)
-    qpos = np.repeat(env.data.qpos[None, :], batch_size, axis=0)
-    qvel = np.repeat(env.data.qvel[None, :], batch_size, axis=0)
-    ctrl = np.repeat(env.data.ctrl[None, :], batch_size, axis=0)
-    mjx_data = base_data.replace(qpos=qpos, qvel=qvel, ctrl=ctrl)
-    return mjx_model, mjx_data
+    raise FileNotFoundError("Unable to locate tvc_3d.xml")
