@@ -74,28 +74,37 @@ class TrainingState:
 
 @dataclass(frozen=True)
 class TrainingConfig:
-    """Enhanced PPO + Evolution configuration."""
-    # PPO settings
+    """Enhanced PPO + Neuroevolution configuration.
+
+    Based on successful rocket stabilization system:
+    - Large population (20+ candidates)
+    - Score-based selection with top performers
+    - Mutation of best candidates to create next generation
+    - Combined with PPO gradient-based learning
+    """
+    # PPO settings - Tuned for continuous control
     gamma: float = 0.99
     lam: float = 0.95
-    learning_rate: float = 3e-4
-    clip_epsilon: float = 0.2
-    rollout_length: int = 256
-    num_epochs: int = 10
-    minibatch_size: int = 64
-    value_clip_epsilon: float = 0.2
-    grad_clip_norm: float = 0.5
-    entropy_coef: float = 0.01
-    entropy_coef_decay: float = 0.995
-    value_coef: float = 0.5
-    weight_decay: float = 1e-5
+    learning_rate: float = 1e-4  # Reduced for stability
+    clip_epsilon: float = 0.15  # Tighter clipping for smoother learning
+    rollout_length: int = 512  # Longer rollouts for better value estimation
+    num_epochs: int = 8  # Reduced to prevent overf itting
+    minibatch_size: int = 128  # Larger batches for stable gradients
+    value_clip_epsilon: float = 0.15
+    grad_clip_norm: float = 1.0  # Increased for stability
+    entropy_coef: float = 0.02  # Higher initial exploration
+    entropy_coef_decay: float = 0.998  # Slower decay
+    value_coef: float = 1.0  # Increased value function importance
+    weight_decay: float = 0.0  # Disabled - let evolution handle regularization
 
-    # Evolution settings
+    # Neuroevolution settings - Based on rocket stabilization paper
     use_evolution: bool = True
-    population_size: int = 5
-    elite_keep: int = 2
-    mutation_scale: float = 0.02
-    evolution_interval: int = 5
+    population_size: int = 20  # Large population like the 1000-network system (scaled down)
+    elite_keep: int = 5  # Keep top 5 performers
+    mutation_scale: float = 0.05  # Larger mutations for exploration
+    mutation_prob: float = 0.8  # 80% of parameters mutated
+    evolution_interval: int = 3  # More frequent evolution
+    fitness_episodes: int = 3  # Evaluate each candidate thoroughly
 
     # Configuration objects
     policy_config: PolicyConfig = PolicyConfig()
@@ -453,35 +462,70 @@ def train_controller(
         current_entropy_coef *= config.entropy_coef_decay
         current_entropy_coef = max(current_entropy_coef, 1e-4)
 
-        # Evolution step
+        # Neuroevolution step - Population-based training like rocket stabilization
         evolution_metrics = {}
         if config.use_evolution and (episode + 1) % config.evolution_interval == 0:
-            # Generate mutants
             state.rng, mut_rng = jax.random.split(state.rng)
-            mutants = []
-            for i in range(config.population_size):
+
+            # Evaluate current policy as baseline
+            current_fitness = _evaluate_candidate(env, stage, state.params, policy_funcs, state.obs_rms,
+                                                 num_episodes=config.fitness_episodes)
+
+            # Build population: current + elites + new mutants
+            population = [(current_fitness, state.params)]
+
+            # Add stored elites if available
+            for elite in state.elites:
+                elite_fitness = _evaluate_candidate(env, stage, elite, policy_funcs, state.obs_rms,
+                                                   num_episodes=config.fitness_episodes)
+                population.append((elite_fitness, elite))
+
+            # Generate mutants from current best and elites
+            mutant_count = config.population_size - len(population)
+            for i in range(mutant_count):
                 mut_key = jax.random.fold_in(mut_rng, i)
-                mutant = mutate_parameters(mut_key, state.params, config.mutation_scale)
-                fitness = _evaluate_candidate(env, stage, mutant, policy_funcs, state.obs_rms, num_episodes=2)
-                mutants.append((fitness, mutant))
 
-            # Keep elites
-            mutants.sort(key=lambda x: x[0], reverse=True)
-            best_mutant_fitness = mutants[0][0]
+                # Mutate from a random elite or current params
+                if state.elites and i % 2 == 0:
+                    parent_idx = i % len(state.elites)
+                    parent = state.elites[parent_idx]
+                else:
+                    parent = state.params
 
-            # Adopt best if better
-            current_fitness = _evaluate_candidate(env, stage, state.params, policy_funcs, state.obs_rms, num_episodes=2)
-            if best_mutant_fitness > current_fitness + 1.0:
-                state.params = mutants[0][1]
-                LOGGER.info("  🧬 Evolution: Adopted mutant | Fitness: %.2f → %.2f",
-                           current_fitness, best_mutant_fitness)
+                mutant = mutate_parameters(mut_key, parent, config.mutation_scale, config.mutation_prob)
+                fitness = _evaluate_candidate(env, stage, mutant, policy_funcs, state.obs_rms,
+                                            num_episodes=config.fitness_episodes)
+                population.append((fitness, mutant))
+
+            # Sort by fitness (higher is better)
+            population.sort(key=lambda x: x[0], reverse=True)
+
+            # Update statistics
+            best_fitness = population[0][0]
+            mean_fitness = np.mean([f for f, _ in population])
+            evolution_metrics["best_fitness"] = best_fitness
+            evolution_metrics["mean_fitness"] = mean_fitness
+            evolution_metrics["current_fitness"] = current_fitness
+
+            # Adopt best candidate if it's significantly better (lower threshold)
+            if best_fitness > current_fitness + 0.5:  # Reduced from 1.0 to 0.5
+                state.params = population[0][1]
+                LOGGER.info("  🧬 Evolution: Adopted best | Fitness: %.2f → %.2f | Pop mean: %.2f",
+                           current_fitness, best_fitness, mean_fitness)
                 evolution_metrics["evolution_adopted"] = 1.0
-                evolution_metrics["fitness_improvement"] = best_mutant_fitness - current_fitness
+                evolution_metrics["fitness_improvement"] = best_fitness - current_fitness
+
+                # Reset optimizer state for new params
+                state.opt_state = optimizer.init(state.params)
             else:
                 evolution_metrics["evolution_adopted"] = 0.0
+                if episode % 10 == 0:  # Log occasionally when not adopting
+                    LOGGER.info("  🧬 Evolution: Kept current | Best: %.2f | Current: %.2f | Mean: %.2f",
+                               best_fitness, current_fitness, mean_fitness)
 
-            state.elites = [m[1] for m in mutants[:config.elite_keep]]
-            evolution_metrics["best_mutant_fitness"] = best_mutant_fitness
+            # Store top elites for next generation
+            state.elites = [params for _, params in population[:config.elite_keep]]
+            evolution_metrics["elite_fitness"] = [f for f, _ in population[:config.elite_keep]]
 
         # Logging
         episode_return = rollout_stats["episode_return"]
