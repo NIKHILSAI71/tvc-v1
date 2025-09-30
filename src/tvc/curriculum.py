@@ -38,10 +38,10 @@ def build_curriculum() -> List[CurriculumStage]:
     Realistic velocities based on F9 landing profile (scaled to model).
     """
 
-    # Stage 1: High hover stabilization at 50m
+    # Stage 1: High hover stabilization at 50m (extended for proper learning)
     hover_stage = CurriculumStage(
         name="hover_stabilization",
-        episodes=200,
+        episodes=300,  # Increased from 200 for better learning
         target_position=(0.0, 0.0, 50.0),
         target_orientation=(1.0, 0.0, 0.0, 0.0),  # upright
         target_velocity=(0.0, 0.0, 0.0),
@@ -50,14 +50,14 @@ def build_curriculum() -> List[CurriculumStage]:
         initial_velocity=(0.0, 0.0, 0.0),
         initial_orientation=(1.0, 0.0, 0.0, 0.0),
         initial_angular_velocity=(0.0, 0.0, 0.0),
-        position_tolerance=2.0,
-        velocity_tolerance=1.0,
-        orientation_tolerance=0.15,
-        angular_velocity_tolerance=0.4,
+        position_tolerance=3.0,  # Relaxed from 2.0 for initial learning
+        velocity_tolerance=1.5,  # Relaxed from 1.0
+        orientation_tolerance=0.2,  # Relaxed from 0.15
+        angular_velocity_tolerance=0.5,  # Relaxed from 0.4
         tolerance_bonus=0.5,
         reward_threshold=0.15,
-        success_episodes=4,
-        min_episodes=60,
+        success_episodes=5,  # Need more consistent success
+        min_episodes=100,  # Increased minimum
     )
 
     # Stage 2: Lateral translation with offset (10m lateral at 50m altitude)
