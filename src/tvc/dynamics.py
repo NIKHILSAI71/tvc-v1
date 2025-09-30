@@ -13,24 +13,31 @@ import jax.numpy as jnp
 class RocketParams:
     """Physical parameters for the 3D rocket model.
 
+    Based on 1:100 scale SpaceX Falcon 9 first stage (realistic model rocket scale):
+    - Full scale: 25,600 kg, 70m tall, 854 kN thrust
+    - Model scale: 256 kg, 0.7m tall, 8540 N thrust
+    - Maintains real thrust-to-weight ratio: ~3.4
+    - Real Merlin 1D throttle: 40-100%
+    - Real TVC range: ±8-10 degrees (~0.14-0.17 rad)
+
     Args:
-        mass: Vehicle mass (kg).
-        inertia: Diagonal inertia tensor (Ixx, Iyy, Izz) (kg·m²).
-        thrust_max: Maximum thrust magnitude (N).
-        thrust_min: Minimum thrust magnitude (N).
+        mass: Vehicle mass (kg) - scaled from F9 empty mass.
+        inertia: Diagonal inertia tensor (Ixx, Iyy, Izz) (kg·m²) - realistic ratios.
+        thrust_max: Maximum thrust magnitude (N) - 100% throttle.
+        thrust_min: Minimum thrust magnitude (N) - 40% throttle (real Merlin limit).
         arm: Lever arm between nozzle pivot and centre of mass (m).
-        damping: Aerodynamic damping (linear_xy, linear_z, angular).
-        gravity: Gravitational acceleration (m/s²).
-        tvc_limit: Maximum TVC gimbal angle (radians).
+        damping: Aerodynamic damping (linear_xy, linear_z, angular) - reduced for altitude.
+        gravity: Gravitational acceleration (m/s²) - Earth standard.
+        tvc_limit: Maximum TVC gimbal angle (radians) - real F9 limit ~±8°.
     """
-    mass: float = 45.0
-    inertia: Tuple[float, float, float] = (120.0, 120.0, 8.0)
-    thrust_max: float = 600.0
-    thrust_min: float = 200.0
-    arm: float = 2.0
-    damping: Tuple[float, float, float] = (5.0, 2.0, 6.0)
-    gravity: float = 9.81
-    tvc_limit: float = 0.3
+    mass: float = 256.0  # 1:100 scale of F9 empty mass (25,600 kg)
+    inertia: Tuple[float, float, float] = (680.0, 680.0, 45.0)  # Realistic cylindrical body ratios
+    thrust_max: float = 8540.0  # 1:100 scale of Merlin 1D (854 kN) → T/W = 3.4
+    thrust_min: float = 3416.0  # 40% throttle (real Merlin minimum)
+    arm: float = 2.0  # Engine to CoM distance
+    damping: Tuple[float, float, float] = (0.4, 0.2, 0.8)  # Reduced for high-altitude flight
+    gravity: float = 9.81  # Earth surface gravity
+    tvc_limit: float = 0.14  # ±8 degrees gimbal (real F9 spec)
 
 
 def quaternion_multiply(q1: jnp.ndarray, q2: jnp.ndarray) -> jnp.ndarray:
@@ -161,8 +168,11 @@ def state_to_observation(state: jnp.ndarray) -> jnp.ndarray:
     return jnp.concatenate([pos, vel, R.reshape(-1), omega])
 
 
-def hover_state(altitude: float = 8.0) -> jnp.ndarray:
-    """Return hovering equilibrium state at given altitude."""
+def hover_state(altitude: float = 50.0) -> jnp.ndarray:
+    """Return hovering equilibrium state at given altitude.
+
+    Default altitude: 50m (realistic landing scenario start point).
+    """
     return jnp.array([
         0.0, 0.0, altitude,  # position
         0.0, 0.0, 0.0,  # velocity
