@@ -1,184 +1,154 @@
-"""Curriculum definition for multi-scenario TVC training."""
+"""Curriculum definition for 3D TVC training."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List
+from typing import List, Tuple
 
 import jax.numpy as jnp
 
 
 @dataclass(frozen=True)
 class CurriculumStage:
-    """Encapsulates stochastic disturbances, targets, and advancement rules."""
-
+    """Training stage with targets and tolerances."""
     name: str
-    disturbance_scale: float
-    target_state: jnp.ndarray
     episodes: int
+    target_position: Tuple[float, float, float]
+    target_orientation: Tuple[float, float, float, float]  # quaternion (w, x, y, z)
+    target_velocity: Tuple[float, float, float]
+    target_angular_velocity: Tuple[float, float, float]
+    initial_position: Tuple[float, float, float]
+    initial_velocity: Tuple[float, float, float]
+    initial_orientation: Tuple[float, float, float, float]
+    initial_angular_velocity: Tuple[float, float, float]
+    position_tolerance: float
+    velocity_tolerance: float
+    orientation_tolerance: float
+    angular_velocity_tolerance: float
+    tolerance_bonus: float
     reward_threshold: float | None = None
     success_episodes: int = 3
     min_episodes: int = 0
-    target_pitch: float = 0.0
-    target_altitude: float = 4.0
-    target_vertical_velocity: float = 0.0
-    target_lateral: float = 0.0
-    phase: str = "hover"
-    initial_altitude: float | None = None
-    initial_vertical_velocity: float = 0.0
-    initial_pitch: float = 0.0
-    initial_pitch_rate: float = 0.0
-    initial_lateral: float = 0.0
-    initial_lateral_velocity: float = 0.0
-    pitch_tolerance: float = 0.12
-    pitch_rate_tolerance: float = 0.45
-    altitude_tolerance: float = 0.5
-    vertical_velocity_tolerance: float = 0.6
-    lateral_tolerance: float = 0.6
-    lateral_velocity_tolerance: float = 0.6
-    tolerance_bonus: float = 0.45
 
 
 def build_curriculum() -> List[CurriculumStage]:
-    """Builds a progressive curriculum covering increasingly harsh scenarios."""
+    """Build progressive 3D curriculum."""
 
-    def _state(x: float, z: float, vx: float = 0.0, vz: float = 0.0, theta: float = 0.0, omega: float = 0.0) -> jnp.ndarray:
-        return jnp.array([x, z, vx, vz, theta, omega])
+    # Stage 1: Hover at 8m
+    hover_stage = CurriculumStage(
+        name="hover_stabilization",
+        episodes=200,
+        target_position=(0.0, 0.0, 8.0),
+        target_orientation=(1.0, 0.0, 0.0, 0.0),  # upright
+        target_velocity=(0.0, 0.0, 0.0),
+        target_angular_velocity=(0.0, 0.0, 0.0),
+        initial_position=(0.0, 0.0, 8.0),
+        initial_velocity=(0.0, 0.0, 0.0),
+        initial_orientation=(1.0, 0.0, 0.0, 0.0),
+        initial_angular_velocity=(0.0, 0.0, 0.0),
+        position_tolerance=1.2,
+        velocity_tolerance=0.8,
+        orientation_tolerance=0.25,
+        angular_velocity_tolerance=0.6,
+        tolerance_bonus=0.5,
+        reward_threshold=0.15,
+        success_episodes=4,
+        min_episodes=60,
+    )
 
-    launch_altitude = 6.5
-    launch_stage = CurriculumStage(
-        name="launch_ascent",
-        disturbance_scale=0.06,
-        target_state=_state(0.0, launch_altitude, 0.0, 0.0, 0.0, 0.0),
-        episodes=160,
+    # Stage 2: Lateral translation (5m offset)
+    lateral_stage = CurriculumStage(
+        name="lateral_translation",
+        episodes=180,
+        target_position=(0.0, 0.0, 8.0),
+        target_orientation=(1.0, 0.0, 0.0, 0.0),
+        target_velocity=(0.0, 0.0, 0.0),
+        target_angular_velocity=(0.0, 0.0, 0.0),
+        initial_position=(5.0, 0.0, 8.0),
+        initial_velocity=(-0.3, 0.0, 0.0),
+        initial_orientation=(1.0, 0.0, 0.0, 0.0),
+        initial_angular_velocity=(0.0, 0.0, 0.0),
+        position_tolerance=1.0,
+        velocity_tolerance=0.7,
+        orientation_tolerance=0.2,
+        angular_velocity_tolerance=0.5,
+        tolerance_bonus=0.6,
         reward_threshold=0.2,
         success_episodes=4,
-        min_episodes=40,
-        target_pitch=0.0,
-        target_altitude=launch_altitude,
-        target_vertical_velocity=0.0,
-        phase="launch",
-        initial_altitude=1.2,
-        initial_vertical_velocity=0.2,
-        initial_pitch=0.0,
-        initial_pitch_rate=0.0,
-        initial_lateral=0.0,
-        initial_lateral_velocity=0.0,
-        pitch_tolerance=0.18,
-        pitch_rate_tolerance=0.55,
-        altitude_tolerance=0.9,
-        vertical_velocity_tolerance=0.8,
-        lateral_tolerance=0.8,
-        lateral_velocity_tolerance=0.75,
-        tolerance_bonus=0.35,
+        min_episodes=50,
     )
 
-    attitude_angle = 0.12  # ~6.9 degrees
-    angle_stage = CurriculumStage(
-        name="angle_hold",
-        disturbance_scale=0.08,
-        target_state=_state(0.0, launch_altitude, 0.0, 0.0, attitude_angle, 0.0),
-        episodes=180,
+    # Stage 3: Altitude climb (8m → 12m)
+    climb_stage = CurriculumStage(
+        name="altitude_climb",
+        episodes=160,
+        target_position=(0.0, 0.0, 12.0),
+        target_orientation=(1.0, 0.0, 0.0, 0.0),
+        target_velocity=(0.0, 0.0, 0.0),
+        target_angular_velocity=(0.0, 0.0, 0.0),
+        initial_position=(0.0, 0.0, 8.0),
+        initial_velocity=(0.0, 0.0, 0.5),
+        initial_orientation=(1.0, 0.0, 0.0, 0.0),
+        initial_angular_velocity=(0.0, 0.0, 0.0),
+        position_tolerance=1.5,
+        velocity_tolerance=0.8,
+        orientation_tolerance=0.2,
+        angular_velocity_tolerance=0.5,
+        tolerance_bonus=0.55,
         reward_threshold=0.18,
         success_episodes=4,
-        min_episodes=50,
-        target_pitch=attitude_angle,
-        target_altitude=launch_altitude,
-        target_vertical_velocity=0.0,
-        phase="attitude",
-        initial_altitude=6.0,
-        initial_vertical_velocity=0.0,
-        initial_pitch=0.02,
-        initial_pitch_rate=0.0,
-        initial_lateral=0.0,
-        initial_lateral_velocity=0.0,
-        pitch_tolerance=0.08,
-        pitch_rate_tolerance=0.4,
-        altitude_tolerance=0.7,
-        vertical_velocity_tolerance=0.6,
-        lateral_tolerance=0.55,
-        lateral_velocity_tolerance=0.55,
-        tolerance_bonus=0.5,
+        min_episodes=45,
     )
 
-    hover_altitude = 4.0
-    hover_stage = CurriculumStage(
-        name="pad_hover",
-        disturbance_scale=0.12,
-        target_state=_state(0.0, hover_altitude, 0.0, 0.0, 0.0, 0.0),
+    # Stage 4: Controlled descent (12m → 5m)
+    descent_stage = CurriculumStage(
+        name="controlled_descent",
         episodes=200,
+        target_position=(0.0, 0.0, 5.0),
+        target_orientation=(1.0, 0.0, 0.0, 0.0),
+        target_velocity=(0.0, 0.0, 0.0),
+        target_angular_velocity=(0.0, 0.0, 0.0),
+        initial_position=(0.0, 0.0, 12.0),
+        initial_velocity=(0.0, 0.0, -0.6),
+        initial_orientation=(1.0, 0.0, 0.0, 0.0),
+        initial_angular_velocity=(0.0, 0.0, 0.0),
+        position_tolerance=1.0,
+        velocity_tolerance=0.6,
+        orientation_tolerance=0.15,
+        angular_velocity_tolerance=0.4,
+        tolerance_bonus=0.65,
+        reward_threshold=0.22,
+        success_episodes=5,
+        min_episodes=70,
+    )
+
+    # Stage 5: Landing approach (5m → 1m)
+    landing_stage = CurriculumStage(
+        name="landing_approach",
+        episodes=220,
+        target_position=(0.0, 0.0, 1.0),
+        target_orientation=(1.0, 0.0, 0.0, 0.0),
+        target_velocity=(0.0, 0.0, 0.0),
+        target_angular_velocity=(0.0, 0.0, 0.0),
+        initial_position=(0.0, 0.0, 5.0),
+        initial_velocity=(0.0, 0.0, -0.4),
+        initial_orientation=(1.0, 0.0, 0.0, 0.0),
+        initial_angular_velocity=(0.0, 0.0, 0.0),
+        position_tolerance=0.6,
+        velocity_tolerance=0.4,
+        orientation_tolerance=0.1,
+        angular_velocity_tolerance=0.3,
+        tolerance_bonus=0.7,
         reward_threshold=0.25,
         success_episodes=5,
-        min_episodes=60,
-        target_pitch=0.0,
-        target_altitude=hover_altitude,
-        phase="hover",
-        initial_altitude=hover_altitude,
-        initial_vertical_velocity=0.0,
-        initial_pitch=0.0,
-        pitch_tolerance=0.06,
-        pitch_rate_tolerance=0.32,
-        altitude_tolerance=0.45,
-        vertical_velocity_tolerance=0.4,
-        lateral_tolerance=0.45,
-        lateral_velocity_tolerance=0.45,
-        tolerance_bonus=0.55,
-    )
-
-    landing_stage = CurriculumStage(
-        name="powered_descent",
-        disturbance_scale=0.18,
-        target_state=_state(0.0, 0.8, 0.0, 0.0, 0.0, 0.0),
-        episodes=220,
-        reward_threshold=0.12,
-        success_episodes=5,
         min_episodes=80,
-        target_pitch=0.0,
-        target_altitude=0.8,
-        target_vertical_velocity=0.0,
-        phase="landing",
-        initial_altitude=7.0,
-        initial_vertical_velocity=-0.4,
-        initial_pitch=0.02,
-        initial_pitch_rate=0.0,
-        pitch_tolerance=0.07,
-        pitch_rate_tolerance=0.35,
-        altitude_tolerance=0.6,
-        vertical_velocity_tolerance=0.45,
-        lateral_tolerance=0.5,
-        lateral_velocity_tolerance=0.5,
-        tolerance_bonus=0.5,
     )
 
-    touchdown_stage = CurriculumStage(
-        name="landing_touchdown",
-        disturbance_scale=0.12,
-        target_state=_state(0.0, 0.6, 0.0, 0.0, 0.0, 0.0),
-        episodes=260,
-        reward_threshold=0.1,
-        success_episodes=5,
-        min_episodes=80,
-        target_pitch=0.0,
-        target_altitude=0.6,
-        target_vertical_velocity=0.0,
-        phase="landing",
-        initial_altitude=1.4,
-        initial_vertical_velocity=-0.2,
-        initial_pitch=0.0,
-        pitch_tolerance=0.05,
-        pitch_rate_tolerance=0.3,
-        altitude_tolerance=0.35,
-        vertical_velocity_tolerance=0.35,
-        lateral_tolerance=0.4,
-        lateral_velocity_tolerance=0.4,
-        tolerance_bonus=0.6,
-    )
-
-    return [launch_stage, angle_stage, hover_stage, landing_stage, touchdown_stage]
+    return [hover_stage, lateral_stage, climb_stage, descent_stage, landing_stage]
 
 
 def select_stage(curriculum: List[CurriculumStage], episode: int) -> CurriculumStage:
-    """Returns the active curriculum stage for the given episode index."""
-
+    """Return active curriculum stage for episode."""
     counter = 0
     for stage in curriculum:
         counter += stage.episodes
