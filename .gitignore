@@ -7,3 +7,5 @@ __pycache__/
 tests/
 .ruff_cache/
 training/
+MUJOCO_LOG.txt
+tvc_output/
