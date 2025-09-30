@@ -1,4 +1,5 @@
-"""Gradient-based MPC solver for planar thrust vector control."""
+"""Gradient-based MPC solver for 3D thrust vector control."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,27 +7,45 @@ from typing import Dict, Tuple
 
 import jax
 import jax.numpy as jnp
-import optax
+from jax import Array
 
 from .dynamics import RocketParams, simulate_rollout
 
 
 @dataclass(frozen=True)
 class MpcConfig:
-    """Configuration bundle for the MPC optimisation routine."""
-
-    horizon: int = 14
+    """Configuration for 3D MPC optimization."""
+    horizon: int = 12
     dt: float = 0.04
-    iterations: int = 48
-    learning_rate: float = 0.05
-    control_limit: float = 0.28
-    position_weight: float = 25.0
-    attitude_weight: float = 60.0
-    velocity_weight: float = 8.0
-    control_weight: float = 2.0
-    terminal_weight: float = 6.0
-    tolerance: float = 1e-3
-    grad_clip: float | None = 1.5
+    iterations: int = 60
+    learning_rate: float = 0.08
+    gimbal_limit: float = 0.25
+    thrust_min: float = 0.2
+    thrust_max: float = 1.0
+    tolerance: float = 1e-4
+    grad_clip: float | None = 2.0
+    position_weight: float = 30.0
+    velocity_weight: float = 12.0
+    orientation_weight: float = 50.0
+    angular_velocity_weight: float = 8.0
+    control_weight: float = 3.0
+    control_smoothness_weight: float = 5.0
+    thrust_efficiency_weight: float = 1.0
+    terminal_weight: float = 8.0
+
+
+def _quaternion_distance(q1: jnp.ndarray, q2: jnp.ndarray) -> jnp.ndarray:
+    """Compute angular distance between quaternions."""
+    dot_product = jnp.abs(jnp.dot(q1, q2))
+    dot_product = jnp.clip(dot_product, 0.0, 1.0)
+    return 2.0 * jnp.arccos(dot_product)
+
+
+def _project_controls(controls: Array, config: MpcConfig) -> Array:
+    """Project controls to valid ranges."""
+    gimbal = jnp.clip(controls[:, :2], -config.gimbal_limit, config.gimbal_limit)
+    thrust = jnp.clip(controls[:, 2:3], config.thrust_min, config.thrust_max)
+    return jnp.concatenate([gimbal, thrust], axis=1)
 
 
 def _cost_function(
@@ -36,126 +55,152 @@ def _cost_function(
     config: MpcConfig,
     params: RocketParams,
 ) -> jnp.ndarray:
+    """Compute trajectory cost."""
     states = simulate_rollout(state, controls, config.dt, params)
-    # Append the initial state for convenience when penalising velocities.
     states_full = jnp.vstack([state[None, :], states])
 
-    position_error = states_full[:, :2] - reference[:2]
-    velocity_error = states_full[:, 2:4] - reference[2:4]
-    attitude_error = states_full[:, 4:] - reference[4:]
+    positions = states_full[:, 0:3]
+    velocities = states_full[:, 3:6]
+    quaternions = states_full[:, 6:10]
+    ang_velocities = states_full[:, 10:13]
 
-    pos_cost = config.position_weight * jnp.sum(jnp.square(position_error))
-    vel_cost = config.velocity_weight * jnp.sum(jnp.square(velocity_error))
-    att_cost = config.attitude_weight * jnp.sum(jnp.square(attitude_error))
-    ctrl_cost = config.control_weight * jnp.sum(jnp.square(controls[1:] - controls[:-1]))
-    term_cost = config.terminal_weight * jnp.sum(jnp.square(states_full[-1] - reference))
-    return pos_cost + vel_cost + att_cost + ctrl_cost + term_cost
+    ref_pos = reference[0:3]
+    ref_vel = reference[3:6]
+    ref_quat = reference[6:10]
+    ref_omega = reference[10:13]
 
+    pos_cost = config.position_weight * jnp.sum(jnp.square(positions - ref_pos[None, :]))
+    vel_cost = config.velocity_weight * jnp.sum(jnp.square(velocities - ref_vel[None, :]))
 
-@jax.jit
-def _project_controls(controls: jnp.ndarray, limit: float) -> jnp.ndarray:
-    return jnp.clip(controls, -limit, limit)
+    orient_cost = 0.0
+    for q in quaternions:
+        orient_cost += config.orientation_weight * _quaternion_distance(q, ref_quat) ** 2
 
+    omega_cost = config.angular_velocity_weight * jnp.sum(jnp.square(ang_velocities - ref_omega[None, :]))
+    ctrl_cost = config.control_weight * jnp.sum(jnp.square(controls))
 
-def compute_tvc_mpc_action(
-    state: jnp.ndarray,
-    reference: jnp.ndarray,
-    params: RocketParams,
-    config: MpcConfig = MpcConfig(),
-    warm_start: jnp.ndarray | None = None,
-) -> Tuple[jnp.ndarray, Dict[str, float], jnp.ndarray]:
-    """Optimises a sequence of TVC offsets and returns the first action.
+    if controls.shape[0] > 1:
+        smoothness = controls[1:] - controls[:-1]
+        smoothness_cost = config.control_smoothness_weight * jnp.sum(jnp.square(smoothness))
+    else:
+        smoothness_cost = 0.0
 
-    Args:
-        state: Current rocket state ``[x, z, vx, vz, theta, omega]``.
-        reference: Desired terminal state vector with identical layout to ``state``.
-        params: Physical parameter bundle describing the rocket.
-        config: MPC hyperparameters controlling horizon, weights, and optimiser.
+    thrust = controls[:, 2]
+    efficiency_cost = config.thrust_efficiency_weight * jnp.sum(jnp.square(thrust))
 
-    Returns:
-        Tuple ``(action, diagnostics, plan)`` where ``action`` is the two-element TVC
-        command and ``plan`` is the optimised horizon of control offsets.
-    """
-
-    horizon = config.horizon
-    controls = jnp.zeros((horizon, 2))
-    if warm_start is not None:
-        warm_start = jnp.asarray(warm_start, dtype=jnp.float32)
-        if warm_start.shape == (horizon, 2):
-            controls = _project_controls(warm_start, config.control_limit)
-    controls_flat = controls.reshape(-1)
-    controls_initial = controls_flat
-
-    def loss_fn(control_flat: jnp.ndarray) -> jnp.ndarray:
-        shaped_controls = control_flat.reshape((horizon, 2))
-        return _cost_function(state, shaped_controls, reference, config, params)
-
-    initial_loss = float(loss_fn(controls_flat))
-    value_and_grad = jax.value_and_grad(loss_fn)
-
-    def opt_step(carry, _):
-        control_flat, opt_state = carry
-        loss, grads = value_and_grad(control_flat)
-        grad_norm = jnp.linalg.norm(grads)
-        if config.grad_clip is not None and config.grad_clip > 0:
-            max_norm = jnp.asarray(config.grad_clip, dtype=grads.dtype)
-            scale = jnp.minimum(1.0, max_norm / (grad_norm + 1e-8))
-            grads = grads * scale
-        updates, opt_state = optimiser.update(grads, opt_state)
-        control_flat = optax.apply_updates(control_flat, updates)
-        control_flat = jnp.asarray(control_flat)
-        control_matrix = jnp.reshape(control_flat, (horizon, 2))
-        control_matrix = _project_controls(control_matrix, config.control_limit)
-        control_flat = jnp.reshape(control_matrix, (-1,))
-        return (control_flat, opt_state), (loss, grad_norm)
-
-    optimiser = optax.adam(config.learning_rate)
-    opt_state = optimiser.init(controls_flat)
-    (control_flat, opt_state), opt_stats = jax.lax.scan(
-        opt_step,
-        (controls_flat, opt_state),
-        None,
-        length=config.iterations,
+    final_pos_error = positions[-1] - ref_pos
+    final_vel_error = velocities[-1] - ref_vel
+    final_quat_dist = _quaternion_distance(quaternions[-1], ref_quat)
+    final_omega_error = ang_velocities[-1] - ref_omega
+    terminal_cost = config.terminal_weight * (
+        jnp.sum(jnp.square(final_pos_error))
+        + jnp.sum(jnp.square(final_vel_error))
+        + final_quat_dist**2
+        + jnp.sum(jnp.square(final_omega_error))
     )
 
-    losses = opt_stats[0]
-    grad_norms = opt_stats[1]
-    controls = control_flat.reshape((horizon, 2))
-    action = controls[0]
-    final_loss_value = loss_fn(control_flat)
-    final_loss = float(final_loss_value)
-    loss_history = losses
-    if loss_history.size == 0:
-        loss_history = jnp.array([initial_loss], dtype=final_loss_value.dtype)
-    loss_history = jnp.concatenate([loss_history, final_loss_value[None]])
-    best_loss = float(jnp.min(loss_history))
-    loss_deltas = jnp.abs(loss_history[1:] - loss_history[:-1])
-    indices = jnp.arange(1, loss_history.shape[0], dtype=jnp.int32)
-    default_iters = jnp.array(loss_history.shape[0], dtype=jnp.int32)
-    if config.tolerance > 0 and loss_deltas.size > 0:
-        converged = jnp.where(loss_deltas < config.tolerance, indices, default_iters)
-        effective_iters = int(jnp.min(converged).item())
-        effective_iters = max(1, min(effective_iters, loss_history.shape[0] - 1))
+    return (
+        pos_cost
+        + vel_cost
+        + orient_cost
+        + omega_cost
+        + ctrl_cost
+        + smoothness_cost
+        + efficiency_cost
+        + terminal_cost
+    )
+
+
+def compute_mpc_action(
+    state: Array,
+    reference: Array,
+    params: RocketParams,
+    config: MpcConfig = MpcConfig(),
+    warm_start: Array | None = None,
+) -> Tuple[Array, Dict[str, float], Array]:
+    """Optimize 3D TVC + thrust controls and return the first action.
+
+    Args:
+        state: Current state [x, y, z, vx, vy, vz, qw, qx, qy, qz, wx, wy, wz]
+        reference: Target state (same format)
+        params: Rocket physical parameters
+        config: MPC configuration
+        warm_start: Optional warm-start control sequence
+
+    Returns:
+        action: First control [gimbal_x, gimbal_y, thrust_frac]
+        diagnostics: Cost and convergence metrics
+        plan: Full optimized control sequence
+    """
+    horizon = int(config.horizon)
+
+    if warm_start is not None:
+        warm_start = jnp.asarray(warm_start, dtype=jnp.float32)
+        if warm_start.shape != (horizon, 3):
+            raise ValueError(f"warm_start must have shape {(horizon, 3)}, got {warm_start.shape}")
+        controls = _project_controls(warm_start, config)
     else:
-        effective_iters = config.iterations
-    saturation_ratio = float(jnp.mean((jnp.abs(controls) >= (config.control_limit - 1e-4)).astype(jnp.float32)))
-    grad_norm_final = float(grad_norms[-1]) if grad_norms.size else 0.0
-    fallback_applied = 0.0
-    if final_loss > initial_loss:
-        if warm_start is not None and warm_start.shape == (horizon, 2):
-            controls = _project_controls(warm_start, config.control_limit)
-        else:
-            controls = controls_initial.reshape((horizon, 2))
-        action = controls[0]
-        final_loss = min(final_loss, initial_loss)
-        fallback_applied = 1.0
+        hover_thrust = (params.mass * params.gravity) / params.thrust_max
+        hover_thrust = jnp.clip(hover_thrust, config.thrust_min, config.thrust_max)
+        controls = jnp.zeros((horizon, 3), dtype=jnp.float32)
+        controls = controls.at[:, 2].set(hover_thrust)
+        controls = _project_controls(controls, config)
+
+    controls_flat = jnp.reshape(controls, (-1,))
+
+    def loss_fn(
+        control_flat: Array,
+        loss_state: Array,
+        loss_reference: Array,
+        loss_config: MpcConfig,
+        loss_params: RocketParams,
+    ) -> Array:
+        ctrl = jnp.reshape(control_flat, (horizon, 3))
+        ctrl = _project_controls(ctrl, loss_config)
+        return _cost_function(loss_state, ctrl, loss_reference, loss_config, loss_params)
+
+    value_and_grad = jax.jit(jax.value_and_grad(loss_fn), static_argnums=(3, 4))
+    grad_fn = jax.jit(jax.grad(loss_fn), static_argnums=(3, 4))
+    control_flat = controls_flat
+    loss_history = []
+
+    for _ in range(config.iterations):
+        loss, grads = value_and_grad(control_flat, state, reference, config, params)
+        grad_norm = jnp.linalg.norm(grads)
+        if config.grad_clip is not None and config.grad_clip > 0:
+            scale = jnp.minimum(1.0, config.grad_clip / (grad_norm + 1e-8))
+            grads = grads * scale
+        control_flat = control_flat - config.learning_rate * grads
+        control_matrix = jnp.reshape(jnp.asarray(control_flat), (horizon, 3))
+        control_matrix = _project_controls(control_matrix, config)
+        control_flat = jnp.reshape(control_matrix, (-1,))
+        loss_history.append(float(loss))
+        if config.tolerance > 0 and len(loss_history) > 1:
+            if abs(loss_history[-1] - loss_history[-2]) < config.tolerance:
+                break
+
+    controls = jnp.reshape(control_flat, (horizon, 3))
+    action = controls[0]
+    final_loss = float(loss_fn(control_flat, state, reference, config, params))
+    initial_loss = loss_history[0] if loss_history else final_loss
+    best_loss = min(loss_history) if loss_history else final_loss
+    grad_norm_final = float(jnp.linalg.norm(grad_fn(control_flat, state, reference, config, params)))
+
+    gimbal_saturation = jnp.mean(jnp.abs(controls[:, :2]) >= (config.gimbal_limit - 1e-4))
+    thrust_at_min = jnp.mean(controls[:, 2] <= (config.thrust_min + 1e-4))
+    thrust_at_max = jnp.mean(controls[:, 2] >= (config.thrust_max - 1e-4))
+
     diagnostics = {
-        "mpc_loss": final_loss,
-        "mpc_initial_loss": initial_loss,
-        "mpc_best_loss": best_loss,
-        "mpc_grad_norm": grad_norm_final,
-        "mpc_iterations": float(effective_iters),
-        "mpc_saturation": saturation_ratio,
-        "mpc_fallback_applied": fallback_applied,
+        "cost": final_loss,
+        "cost_initial": initial_loss,
+        "cost_best": best_loss,
+        "grad_norm": float(grad_norm_final),
+        "iterations": float(len(loss_history)),
+        "gimbal_saturation": float(gimbal_saturation),
+        "thrust_at_min": float(thrust_at_min),
+        "thrust_at_max": float(thrust_at_max),
+        "mean_thrust": float(jnp.mean(controls[:, 2])),
+        "mean_gimbal_magnitude": float(jnp.mean(jnp.linalg.norm(controls[:, :2], axis=1))),
     }
+
     return action, diagnostics, controls
