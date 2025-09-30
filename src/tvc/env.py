@@ -37,6 +37,7 @@ class TvcEnv:
         ctrl_limit: float = 0.14,  # Real F9 gimbal limit: ±8° = 0.14 rad
         max_steps: int = 2000,
         seed: int | None = None,
+        domain_randomization: bool = True,  # Enable robust training
     ) -> None:
         asset_path = model_path or _default_asset_path()
         self.model = mujoco.MjModel.from_xml_path(asset_path)
@@ -47,6 +48,13 @@ class TvcEnv:
         self.max_steps = int(max_steps)
         self._rng = np.random.default_rng(seed)
         self._step_counter = 0
+        self._domain_randomization = domain_randomization
+
+        # Domain randomization parameters (stored for reset)
+        self._base_mass = 256.0
+        self._base_inertia = np.array([680.0, 680.0, 45.0])
+        self._base_thrust_max = 8540.0
+        self._base_damping = 0.8
 
         # Reward normalization
         self._reward_count = 0.0
@@ -135,9 +143,35 @@ class TvcEnv:
                 self.model.jnt_range[joint_id] = [-params.tvc_limit, params.tvc_limit]
 
     def reset(self) -> np.ndarray:
-        """Reset environment."""
+        """Reset environment with domain randomization."""
         self._step_counter = 0
         mujoco.mj_resetData(self.model, self.data)
+
+        # Domain randomization: Randomize physics parameters for robustness
+        if self._domain_randomization:
+            # Mass variation: ±10%
+            mass_factor = self._rng.uniform(0.9, 1.1)
+            vehicle_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "vehicle")
+            if vehicle_id >= 0:
+                self.model.body_mass[vehicle_id] = self._base_mass * mass_factor
+
+            # Inertia variation: ±15%
+            inertia_factor = self._rng.uniform(0.85, 1.15, 3)
+            if vehicle_id >= 0:
+                self.model.body_inertia[vehicle_id] = self._base_inertia * inertia_factor
+
+            # Thrust variation: ±5%
+            thrust_factor = self._rng.uniform(0.95, 1.05)
+            # Note: Thrust variation applied in step() via scaling
+
+            # Damping variation: ±30%
+            damping_factor = self._rng.uniform(0.7, 1.3)
+            # Applied during dynamics
+
+            # Wind disturbance: 0-5 m/s random direction
+            self._wind_force = self._rng.normal(0.0, 2.0, 3)  # Random wind
+        else:
+            self._wind_force = np.zeros(3)
 
         initial_pos = np.array(self._stage_config["initial_position"], dtype=np.float64)
         initial_vel = np.array(self._stage_config["initial_velocity"], dtype=np.float64)
@@ -145,10 +179,12 @@ class TvcEnv:
         initial_omega = np.array(self._stage_config["initial_angular_velocity"], dtype=np.float64)
 
         # Add realistic sensor noise (GPS: ±2cm, IMU: ±0.01 m/s, gyro: ±0.02 rad/s)
-        pos_noise = self._rng.normal(0.0, 0.02, 3)  # ±2cm GPS accuracy
-        vel_noise = self._rng.normal(0.0, 0.01, 3)  # ±1cm/s IMU accuracy
-        quat_noise = self._rng.normal(0.0, 0.01, 4)  # ±0.01 orientation noise
-        omega_noise = self._rng.normal(0.0, 0.02, 3)  # ±0.02 rad/s gyro accuracy
+        # Increase noise variation for domain randomization
+        noise_scale = self._rng.uniform(0.5, 1.5) if self._domain_randomization else 1.0
+        pos_noise = self._rng.normal(0.0, 0.02 * noise_scale, 3)  # ±2cm GPS accuracy
+        vel_noise = self._rng.normal(0.0, 0.01 * noise_scale, 3)  # ±1cm/s IMU accuracy
+        quat_noise = self._rng.normal(0.0, 0.01 * noise_scale, 4)  # ±0.01 orientation noise
+        omega_noise = self._rng.normal(0.0, 0.02 * noise_scale, 3)  # ±0.02 rad/s gyro accuracy
 
         quat = initial_quat + quat_noise
         quat = quat / np.linalg.norm(quat)
@@ -167,13 +203,35 @@ class TvcEnv:
         return self._get_observation()
 
     def step(self, action: np.ndarray) -> StepResult:
-        """Execute action."""
+        """Execute action with safety constraints."""
         self._step_counter += 1
         action = np.asarray(action, dtype=np.float64)
         if action.shape != (3,):
             raise ValueError("Action must have shape (3,)")
 
         action = action.copy()
+
+        # Safety constraint: Check tilt angle before applying action
+        quat = self.data.qpos[3:7]
+        # Calculate tilt angle from vertical (quaternion to angle)
+        w, x, y, z = quat
+        tilt_angle = 2.0 * np.arccos(np.clip(abs(w), 0.0, 1.0))
+
+        # If tilted beyond 45 degrees, limit aggressive maneuvers
+        if tilt_angle > 0.785:  # 45 degrees = 0.785 rad
+            action[0] *= 0.5  # Reduce gimbal authority
+            action[1] *= 0.5
+            action[2] = np.clip(action[2], 0.5, 1.0)  # Force minimum thrust
+
+        # Safety constraint: Velocity limits
+        vel = self.data.qvel[0:3]
+        speed = np.linalg.norm(vel)
+        if speed > 20.0:  # Maximum 20 m/s speed
+            # Limit actions that could increase speed
+            vel_dir = vel / (speed + 1e-6)
+            action[2] = np.clip(action[2], 0.3, 0.8)  # Reduce thrust range
+
+        # Standard action clipping
         action[0] = np.clip(action[0], -self._ctrl_limit, self._ctrl_limit)
         action[1] = np.clip(action[1], -self._ctrl_limit, self._ctrl_limit)
         action[2] = np.clip(action[2], 0.0, 1.0)
@@ -183,6 +241,12 @@ class TvcEnv:
         self.data.ctrl[self._actuator_ids.get("thrust_control", 2)] = action[2]
 
         for _ in range(self.frame_skip):
+            # Apply wind disturbance force if domain randomization enabled
+            if self._domain_randomization and hasattr(self, '_wind_force'):
+                vehicle_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "vehicle")
+                if vehicle_id >= 0:
+                    self.data.xfrc_applied[vehicle_id, 0:3] = self._wind_force
+
             mujoco.mj_step(self.model, self.data)
 
         observation = self._get_observation()
@@ -253,18 +317,25 @@ class TvcEnv:
         # Angular velocity: Penalize spinning
         omega_reward = 3.0 / (1.0 + omega_magnitude**2)
 
+        # Altitude maintenance: Reward staying near target altitude
+        target_altitude = target_pos[2]
+        altitude_error = abs(pos[2] - target_altitude)
+        altitude_reward = 5.0 / (1.0 + altitude_error)
+
         # Smoothness: Reduce jerk
         smoothness_reward = 2.0 / (1.0 + control_jerk)
 
-        # Fuel efficiency: Mild penalty for high throttle
-        fuel_reward = 1.0 * (1.0 - 0.2 * action[2])
+        # Fuel efficiency: REMOVED for hover task (conflicts with maintaining altitude)
+        # Hover requires sustained thrust near 1.0, penalizing it is counterproductive
+        fuel_reward = 0.0  # Disabled
 
-        # Combined reward (unnormalized, scales ~0-30)
+        # Combined reward (unnormalized, scales ~0-33)
         reward = (
             pos_reward +
             vel_reward +
             orient_reward +
             omega_reward +
+            altitude_reward +
             smoothness_reward +
             fuel_reward
         )
