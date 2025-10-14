@@ -35,7 +35,7 @@ class TvcEnv:
         model_path: str | None = None,
         dt: float = 0.02,
         ctrl_limit: float = 0.14,  # Real F9 gimbal limit: ±8° = 0.14 rad
-        max_steps: int = 2000,
+        max_steps: int = 1000,  # Reduced from 2000 for faster initial learning
         seed: int | None = None,
         domain_randomization: bool = True,  # Enable robust training
         actuator_delay_steps: int = 0,  # Actuator delay (0 = no delay, 1-3 = realistic)
@@ -328,11 +328,12 @@ class TvcEnv:
         # Velocity: Important - use inverse linear
         vel_reward = 5.0 / (1.0 + vel_error)
 
-        # Orientation: Critical - reward alignment
-        orient_reward = 8.0 * (orient_alignment**4)  # Sharp reward for staying upright
+        # Orientation: CRITICAL - much stronger reward for staying upright
+        # Use exponential falloff (orient_alignment**8) to heavily penalize any tilt
+        orient_reward = 20.0 * (orient_alignment**8)  # Exponential reward for staying upright
 
-        # Angular velocity: Penalize spinning
-        omega_reward = 3.0 / (1.0 + omega_magnitude**2)
+        # Angular velocity: Penalize spinning heavily
+        omega_reward = 5.0 / (1.0 + omega_magnitude**2)
 
         # Altitude maintenance: Reward staying near target altitude
         target_altitude = target_pos[2]
@@ -379,8 +380,17 @@ class TvcEnv:
         ):
             reward += 15.0  # Large bonus for goal achievement
 
-        # Crash penalty
+        # CRITICAL: Strong penalties for failure states
+        # Crash penalty - very large to discourage hitting ground
         if pos[2] < 0.2:
+            reward -= 50.0
+        
+        # CRITICAL: Penalty for excessive tilt (more than ~45 degrees off vertical)
+        if orient_alignment < 0.7:  # cos(45°) ≈ 0.707
+            reward -= 30.0
+        
+        # CRITICAL: Penalty for spinning out of control
+        if omega_magnitude > 1.0:
             reward -= 20.0
 
         # Don't normalize - let PPO learn the scale naturally
@@ -406,14 +416,32 @@ class TvcEnv:
     def _check_termination(self) -> bool:
         """Check episode termination - Realistic landing bounds."""
         pos = self.data.qpos[0:3]
+        quat = self.data.qpos[3:7]
+        omega = self.data.qvel[3:6]
+        
         # Terminate if crashed (below 0.1m) or exceeded max altitude (200m)
         if pos[2] < 0.1 or pos[2] > 200.0:
             return True
+        
         # Terminate if drifted too far laterally (50m radius)
         if np.linalg.norm(pos[0:2]) > 50.0:
             return True
+        
+        # CRITICAL: Terminate if tipped over too much (more than 60 degrees from vertical)
+        # For quaternion [w, x, y, z], w represents rotation around vertical axis
+        # abs(w) close to 1.0 means upright, close to 0 means sideways
+        w = quat[0]
+        tilt_angle = 2.0 * np.arccos(np.clip(abs(w), 0.0, 1.0))
+        if tilt_angle > 1.047:  # 60 degrees = 1.047 radians
+            return True
+        
+        # CRITICAL: Terminate if spinning too fast (more than 2 rad/s angular velocity)
+        if np.linalg.norm(omega) > 2.0:
+            return True
+        
         if self._step_counter >= self.max_steps:
             return True
+        
         return False
 
     def _get_info(self, action: np.ndarray) -> Dict[str, float]:
