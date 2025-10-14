@@ -50,10 +50,10 @@ def build_curriculum() -> List[CurriculumStage]:
         initial_velocity=(0.0, 0.0, 0.0),
         initial_orientation=(1.0, 0.0, 0.0, 0.0),
         initial_angular_velocity=(0.0, 0.0, 0.0),
-        position_tolerance=3.0,  # Relaxed from 2.0 for initial learning
-        velocity_tolerance=1.5,  # Relaxed from 1.0
-        orientation_tolerance=0.2,  # Relaxed from 0.15
-        angular_velocity_tolerance=0.5,  # Relaxed from 0.4
+        position_tolerance=2.0,  # Stricter: must stay within 2m
+        velocity_tolerance=1.0,  # Stricter: must be nearly stationary
+        orientation_tolerance=0.15,  # Stricter orientation requirement
+        angular_velocity_tolerance=0.3,  # CRITICAL: Must not be spinning (was 0.5)
         tolerance_bonus=0.5,
         reward_threshold=0.15,
         success_episodes=5,  # Need more consistent success
