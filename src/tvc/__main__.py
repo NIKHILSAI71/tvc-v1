@@ -4,11 +4,35 @@ import logging
 import sys
 from pathlib import Path
 
+# Force unbuffered output for Kaggle/Jupyter notebooks
+sys.stdout.reconfigure(line_buffering=True) if hasattr(sys.stdout, 'reconfigure') else None
+sys.stderr.reconfigure(line_buffering=True) if hasattr(sys.stderr, 'reconfigure') else None
+
+# Configure logging with immediate flushing
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
+    force=True,  # Force reconfiguration even if logging was previously configured
+    stream=sys.stdout  # Explicitly use stdout
 )
+
+# Add a custom handler that flushes after every log
+class FlushStreamHandler(logging.StreamHandler):
+    def emit(self, record):
+        super().emit(record)
+        self.flush()
+
+# Replace default handler with flushing handler
+logger = logging.getLogger()
+logger.handlers.clear()
+handler = FlushStreamHandler(sys.stdout)
+handler.setFormatter(logging.Formatter(
+    "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+))
+logger.addHandler(handler)
+logger.setLevel(logging.INFO)
 
 LOGGER = logging.getLogger(__name__)
 
