@@ -71,6 +71,7 @@ def cmd_train(args) -> int:
             output_dir=Path(args.output_dir),
             seed=args.seed,
             resume_from=resume_from,
+            visualize=args.visualize,
         )
 
         LOGGER.info("=" * 60)
@@ -201,6 +202,7 @@ def main() -> int:
     train_parser.add_argument("--num-epochs", type=int, default=4, help="PPO epochs per update")
     train_parser.add_argument("--minibatch-size", type=int, default=256, help="PPO minibatch size (optimized)")
     train_parser.add_argument("--resume-from", type=str, default=None, help="Resume from checkpoint (e.g., checkpoints/policy_ep0100.msgpack)")
+    train_parser.add_argument("--visualize", action="store_true", help="Show live visualization of the training process")
 
     # Evaluate command
     eval_parser = subparsers.add_parser(
