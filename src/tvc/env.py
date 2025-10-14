@@ -419,11 +419,41 @@ class TvcEnv:
         else:
             stability_reward = 0.0
 
+        # CRITICAL FIX: Thrust guidance reward to teach proper throttle control
+        # For a 256kg rocket with gravity 9.81 m/s², hover thrust = (256 * 9.81) / 8540 ≈ 0.294
+        # This reward guides the policy to use appropriate thrust based on vertical state
+        hover_thrust = 0.294  # Theoretical hover thrust fraction
+        thrust_action = float(action[2])  # Thrust command [0, 1]
+        
+        # Compute desired thrust based on vertical state
+        altitude_error_z = pos[2] - target_altitude
+        vertical_velocity = vel[2]
+        
+        # Desired thrust adjustment from hover point
+        # If below target: need more thrust (> 0.294)
+        # If above target: need less thrust (< 0.294)
+        # Scale by errors to provide smooth gradient
+        altitude_correction = -0.15 * np.clip(altitude_error_z / 5.0, -1.0, 1.0)  # ±15% adjustment
+        velocity_correction = -0.10 * np.clip(vertical_velocity / 2.0, -1.0, 1.0)  # ±10% adjustment
+        desired_thrust = hover_thrust + altitude_correction + velocity_correction
+        desired_thrust = np.clip(desired_thrust, 0.15, 0.60)  # Keep in reasonable range
+        
+        # Reward thrust being near desired value (inverted quadratic penalty)
+        thrust_error = abs(thrust_action - desired_thrust)
+        thrust_guidance_reward = 8.0 / (1.0 + thrust_error * 10.0)  # Peak reward when error=0
+        
+        # Extra bonus for using ANY thrust when near hover state (prevents zero-thrust collapse)
+        if pos_error < 3.0 and abs(vertical_velocity) < 1.5:  # Near hover conditions
+            if thrust_action > 0.15:  # Using significant thrust
+                thrust_guidance_reward += 3.0  # Bonus for not giving up
+            else:  # Using very little thrust (< 15%)
+                thrust_guidance_reward -= 5.0  # Penalty for zero-thrust behavior
+        
         # Fuel efficiency: REMOVED for hover task (conflicts with maintaining altitude)
         # Hover requires sustained thrust near 1.0, penalizing it is counterproductive
         fuel_reward = 0.0  # Disabled
 
-        # Combined reward (unnormalized, scales ~0-40 with shaping)
+        # Combined reward (unnormalized, scales ~0-50 with shaping and thrust guidance)
         reward = (
             pos_reward +
             vel_reward +
@@ -433,7 +463,8 @@ class TvcEnv:
             smoothness_reward +
             progress_reward +
             stability_reward +
-            fuel_reward
+            fuel_reward +
+            thrust_guidance_reward  # CRITICAL: Teaches proper thrust control
         )
 
         # Bonus for being within tolerance (achieving goal)
