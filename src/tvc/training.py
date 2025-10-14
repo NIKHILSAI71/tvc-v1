@@ -95,7 +95,6 @@ class TrainingConfig:
     - Mutation of best candidates to create next generation
     - Combined with PPO gradient-based learning
     """
-    # PPO settings - Optimized based on analysis
     gamma: float = 0.99
     lam: float = 0.95
     learning_rate: float = 5e-4  # Increased from 3e-4 for faster learning
@@ -106,7 +105,7 @@ class TrainingConfig:
     value_clip_epsilon: float = 0.2  # Match actor clipping
     grad_clip_norm: float = 0.5  # Conservative to prevent instability
     entropy_coef: float = 0.01   # Initial exploration coefficient
-    entropy_coef_decay: float = 0.9995  # Slower decay to prevent exploration collapse
+    entropy_coef_decay: float = 0.9995
     value_coef: float = 0.5      # Balanced value function importance
     weight_decay: float = 1e-5   # Light regularization
 
@@ -530,8 +529,7 @@ def train_controller(
                 total_episodes, config.rollout_length, config.use_evolution)
     LOGGER.info("=" * 80)
 
-    # Create environment
-    env = TvcEnv(dt=0.02, ctrl_limit=0.3, max_steps=2000, seed=seed)
+    env = TvcEnv(dt=0.02, ctrl_limit=0.14, max_steps=1000, seed=seed)
     env.apply_rocket_params(config.rocket_params)
 
     # Build curriculum
@@ -550,7 +548,6 @@ def train_controller(
 
     # Setup optimizer with adaptive learning rate schedule
     # Cosine annealing with warmup for stable learning
-    # For very short training runs (< 10 episodes), skip warmup to avoid scheduling issues
     if total_episodes < 10:
         # Use constant learning rate for short runs
         lr_schedule = config.learning_rate
@@ -766,14 +763,12 @@ def train_controller(
                 f.write(serialization.to_bytes(state.params))
             LOGGER.info("💾 Checkpoint saved: %s", checkpoint_path)
 
-            # Also save if this is a new best
             if episode_return >= state.best_return:
                 best_path = output_dir / "policy_best.msgpack"
                 with open(best_path, "wb") as f:
                     f.write(serialization.to_bytes(state.params))
                 LOGGER.info("🏆 New best policy saved: %s (return: %.2f)", best_path, episode_return)
 
-        # Stage progression - Auto-advance based on performance
         state.stage_episode += 1
 
         # Check if we should progress to next stage (performance-based)
