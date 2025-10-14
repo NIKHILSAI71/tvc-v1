@@ -10,7 +10,9 @@
 -->
 <mujoco model="tvc_rocket_3d">
   <compiler angle="radian" inertiafromgeom="true"/>
-  <option timestep="0.002" gravity="0 0 -9.81" integrator="RK4"/>
+  <option timestep="0.002" gravity="0 0 -9.81" integrator="RK4">
+    <flag constraint="enable" limit="enable"/>
+  </option>
 
   <default>
     <joint armature="0.0" damping="0.2" limited="true"/>
@@ -90,9 +92,9 @@
         <geom name="actuator_3" type="box" pos="0 0.32 0" size="0.04 0.05 0.08" material="engine_metal" mass="1.0"/>
         <geom name="actuator_4" type="box" pos="0 -0.32 0" size="0.04 0.05 0.08" material="engine_metal" mass="1.0"/>
 
-        <!-- Gimbal system - X-axis (pitch) - Real F9 limit ±8° (0.14 rad) -->
+          <!-- Gimbal system - X-axis (pitch) - Real F9 limit ±8° (0.14 rad) -->
         <body name="gimbal_x" pos="0 0 0">
-          <joint name="tvc_x" type="hinge" axis="1 0 0" range="-0.14 0.14" damping="25" armature="0.1"/>
+          <joint name="tvc_x" type="hinge" axis="1 0 0" range="-0.14 0.14" limited="true" damping="10" stiffness="0" armature="0.05"/>
           <geom name="gimbal_ring_x" type="cylinder" pos="0 0 0" size="0.28 0.025" material="gimbal_frame" mass="2.0"/>
           
           <!-- X-axis bearings -->
@@ -101,7 +103,7 @@
           
           <!-- Y-axis gimbal (yaw) - Real F9 limit ±8° (0.14 rad) -->
           <body name="gimbal_y" pos="0 0 0">
-            <joint name="tvc_y" type="hinge" axis="0 1 0" range="-0.14 0.14" damping="25" armature="0.1"/>
+            <joint name="tvc_y" type="hinge" axis="0 1 0" range="-0.14 0.14" limited="true" damping="10" stiffness="0" armature="0.05"/>
             <geom name="gimbal_ring_y" type="cylinder" pos="0 0 0" size="0.22 0.02" material="gimbal_frame" mass="1.5"/>
             
             <!-- Y-axis bearings -->
@@ -133,9 +135,19 @@
               <!-- Nozzle exit -->
               <geom name="nozzle_exit" type="cylinder" pos="0 0 -0.78" size="0.18 0.03" material="engine_metal" mass="0.5"/>
               
-              <!-- Dynamic thrust plume (will scale with thrust) -->
-              <geom name="exhaust_core" type="capsule" fromto="0 0 -0.75 0 0 -2.5" size="0.12" material="flame" contype="0" conaffinity="0" mass="0.001"/>
-              <geom name="exhaust_outer" type="capsule" fromto="0 0 -0.75 0 0 -3.0" size="0.18" material="thrust_trail" contype="0" conaffinity="0" mass="0.001"/>
+              <!-- Multi-layer thrust plume for dynamic visualization (fade via rgba alpha) -->
+              <!-- FIXED: Initial alpha values set to visible (will be dynamically updated based on thrust) -->
+              <!-- Layer 1: Short plume (0-30% thrust) -->
+              <geom name="plume_short" type="capsule" fromto="0 0 -0.75 0 0 -1.2" size="0.10" rgba="0.98 0.5 0.1 0.6" contype="0" conaffinity="0" mass="0.001"/>
+              
+              <!-- Layer 2: Medium plume (30-60% thrust) -->
+              <geom name="plume_medium" type="capsule" fromto="0 0 -0.75 0 0 -2.0" size="0.12" rgba="0.98 0.5 0.1 0.5" contype="0" conaffinity="0" mass="0.001"/>
+              
+              <!-- Layer 3: Long plume (60-100% thrust) -->
+              <geom name="plume_long" type="capsule" fromto="0 0 -0.75 0 0 -2.8" size="0.14" rgba="0.98 0.5 0.1 0.4" contype="0" conaffinity="0" mass="0.001"/>
+              
+              <!-- Outer dispersed plume -->
+              <geom name="plume_outer" type="capsule" fromto="0 0 -0.75 0 0 -3.2" size="0.18" rgba="0.9 0.4 0.05 0.3" contype="0" conaffinity="0" mass="0.001"/>
               
               <!-- Thrust measurement point -->
               <site name="thrust_site" pos="0 0 -1.5" size="0.05" rgba="1 0.5 0 1"/>
@@ -157,12 +169,19 @@
 
   <!-- 3D Control actuators: TVC + Thrust magnitude -->
   <actuator>
-    <!-- TVC gimbal control - Realistic hydraulic actuator strength -->
-    <motor name="tvc_pitch" joint="tvc_x" gear="150" ctrlrange="-1 1"/>
-    <motor name="tvc_yaw" joint="tvc_y" gear="150" ctrlrange="-1 1"/>
+    <!-- TVC gimbal control - POSITION SERVOS with PD control -->
+    <!-- Position servos with sufficient exploration noise CAN provide continuous control -->
+    <!-- The key: policy must learn to VARY outputs based on feedback, not output constants -->
+    <!-- kp = position gain (stiffness), kv = velocity gain (damping) -->
+    <!-- High kp/kv = fast, tight tracking; critical for responsive control -->
+    <position name="tvc_pitch" joint="tvc_x" kp="300" kv="50" ctrlrange="-1 1"/>
+    <position name="tvc_yaw" joint="tvc_y" kp="300" kv="50" ctrlrange="-1 1"/>
 
   <!-- AI-controlled thrust magnitude: 8540 N max (matches dynamics.py) -->
-  <general name="thrust_control" site="thrust_site" ctrlrange="0 1" gear="0 0 8540 0 0 0"/>
+  <!-- FIXED: Using motor actuator for direct force control at thrust site -->
+  <!-- gear="0 0 8540 0 0 0" means: [force_x, force_y, force_z, torque_x, torque_y, torque_z] -->
+  <!-- Only force_z (index 2) is non-zero, applying 8540N upward thrust -->
+  <general name="thrust_control" site="thrust_site" ctrlrange="0 1" gear="0 0 8540 0 0 0" dyntype="none" gaintype="fixed" biastype="none"/>
   </actuator>
 
   <!-- Enhanced sensor suite for 3D state estimation -->
