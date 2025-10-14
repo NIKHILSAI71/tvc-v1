@@ -526,9 +526,12 @@ def train_controller(
     LOGGER.info("🚀 ENHANCED TVC TRAINING - PPO + Evolution")
     LOGGER.info("=" * 80)
     LOGGER.info("Episodes: %d | Rollout: %d | Evolution: %s",
-                total_episodes, config.rollout_length, config.use_evolution)
+               total_episodes, config.rollout_length, config.use_evolution)
     LOGGER.info("=" * 80)
-
+    import sys
+    sys.stdout.flush()
+    sys.stderr.flush()
+    
     env = TvcEnv(dt=0.02, ctrl_limit=0.14, max_steps=1000, seed=seed)
     env.apply_rocket_params(config.rocket_params)
 
@@ -599,6 +602,8 @@ def train_controller(
 
     LOGGER.info("✅ Training initialized | Policy params: %d | Start episode: %d",
                 sum(p.size for p in jax.tree_util.tree_leaves(params)), start_episode)
+    sys.stdout.flush()
+    sys.stderr.flush()
 
     current_entropy_coef = config.entropy_coef
     start_time = time.time()
@@ -608,6 +613,8 @@ def train_controller(
     if visualize:
         viewer = mujoco.viewer.launch_passive(env.model, env.data)
         LOGGER.info("🎥 Live visualization enabled - MuJoCo viewer launched")
+        sys.stdout.flush()
+        sys.stderr.flush()
 
     # Training loop
     for episode in range(start_episode, total_episodes):
@@ -752,6 +759,10 @@ def train_controller(
                 update_metrics["loss"],
                 episode_time,
             )
+            # Force flush for Kaggle/Jupyter environments
+            import sys
+            sys.stdout.flush()
+            sys.stderr.flush()
 
         # Periodic checkpointing (every 50 episodes)
         if output_dir and (episode + 1) % 50 == 0:
