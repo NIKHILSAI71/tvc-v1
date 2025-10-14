@@ -34,12 +34,13 @@ def cmd_train(args) -> int:
     policy_config = PolicyConfig(
         hidden_dims=(512, 512, 256, 128),
         action_dims=3,
-        action_limit=0.3,
+        action_limit=0.14,  # Match XML gimbal limit (±8° = 0.14 rad)
         use_layer_norm=True,
+        log_std_init=-1.5,  # Reduced noise for smoother initial actions
     )
 
     mpc_config = MpcConfig(
-        gimbal_limit=0.3,
+        gimbal_limit=0.14,  # Match XML gimbal limit
         horizon=12,
         iterations=60,
     )
