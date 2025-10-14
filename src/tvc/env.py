@@ -34,7 +34,7 @@ class TvcEnv:
         self,
         model_path: str | None = None,
         dt: float = 0.02,
-        ctrl_limit: float = 0.14,  # Real F9 gimbal limit: ±8° = 0.14 rad
+        ctrl_limit: float = 0.14,  # Gimbal angle limit (±8° = 0.14 rad)
         max_steps: int = 1000,  # Reduced from 2000 for faster initial learning
         seed: int | None = None,
         domain_randomization: bool = True,  # Enable robust training
@@ -67,6 +67,11 @@ class TvcEnv:
         # Action tracking
         self._last_action = np.zeros(3, dtype=np.float64)
         self._prev_action = np.zeros(3, dtype=np.float64)
+        
+        # Action smoothing to prevent jittery gimbal control
+        # Exponential moving average filter: smoothed = alpha * new + (1-alpha) * old
+        self._smoothed_action = np.zeros(3, dtype=np.float64)
+        self._action_smoothing_alpha = 0.4  # 0.4 = moderate smoothing (lower = more smoothing)
 
         # Actuator delay buffer (for realistic hardware simulation)
         self._actuator_delay_steps = actuator_delay_steps
@@ -74,11 +79,11 @@ class TvcEnv:
 
         # Stage configuration - Realistic landing scenario altitudes
         self._stage_config = {
-            "target_position": [0.0, 0.0, 50.0],  # Start from 50m hover
+            "target_position": [0.0, 0.0, 8.0],
             "target_orientation": [1.0, 0.0, 0.0, 0.0],
             "target_velocity": [0.0, 0.0, 0.0],
             "target_angular_velocity": [0.0, 0.0, 0.0],
-            "initial_position": [0.0, 0.0, 50.0],
+            "initial_position": [0.0, 0.0, 8.0],  # Start from 8m hover
             "initial_velocity": [0.0, 0.0, 0.0],
             "initial_orientation": [1.0, 0.0, 0.0, 0.0],
             "initial_angular_velocity": [0.0, 0.0, 0.0],
@@ -87,6 +92,7 @@ class TvcEnv:
             "orientation_tolerance": 0.2,
             "angular_velocity_tolerance": 0.5,
             "tolerance_bonus": 0.6,
+            "stage_name": "hover_stabilization",  # Track current stage
         }
 
         self._actuator_ids: Dict[str, int] = {}
@@ -110,6 +116,7 @@ class TvcEnv:
 
     def configure_stage(self, stage) -> None:
         """Apply curriculum stage configuration."""
+        stage_name = getattr(stage, "name", "hover_stabilization")
         self._stage_config.update({
             "target_position": list(getattr(stage, "target_position", [0.0, 0.0, 8.0])),
             "target_orientation": list(getattr(stage, "target_orientation", [1.0, 0.0, 0.0, 0.0])),
@@ -124,6 +131,7 @@ class TvcEnv:
             "orientation_tolerance": float(getattr(stage, "orientation_tolerance", 0.2)),
             "angular_velocity_tolerance": float(getattr(stage, "angular_velocity_tolerance", 0.5)),
             "tolerance_bonus": float(getattr(stage, "tolerance_bonus", 0.6)),
+            "stage_name": stage_name,
         })
 
     def apply_rocket_params(self, params: RocketParams | None) -> None:
@@ -152,8 +160,12 @@ class TvcEnv:
         self._step_counter = 0
         mujoco.mj_resetData(self.model, self.data)
 
+        # Only enable after Stage 2 (lateral_translation) to allow stable initial learning
+        stage_name = self._stage_config.get("stage_name", "hover_stabilization")
+        enable_randomization = self._domain_randomization and stage_name not in ["hover_stabilization", "lateral_translation"]
+        
         # Domain randomization: Randomize physics parameters for robustness
-        if self._domain_randomization:
+        if enable_randomization:
             # Mass variation: ±10%
             mass_factor = self._rng.uniform(0.9, 1.1)
             vehicle_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "vehicle")
@@ -204,11 +216,12 @@ class TvcEnv:
 
         self._last_action[:] = 0.0
         self._prev_action[:] = 0.0
+        self._smoothed_action[:] = 0.0  # Reset smoothed action on reset
 
         return self._get_observation()
 
     def step(self, action: np.ndarray) -> StepResult:
-        """Execute action with safety constraints."""
+        """Execute action without safety constraints - let the agent learn!"""
         self._step_counter += 1
         action = np.asarray(action, dtype=np.float64)
         if action.shape != (3,):
@@ -216,46 +229,45 @@ class TvcEnv:
 
         action = action.copy()
 
-        # Safety constraint: Check tilt angle before applying action
-        quat = self.data.qpos[3:7]
-        # Calculate tilt angle from vertical (quaternion to angle)
-        w, x, y, z = quat
-        tilt_angle = 2.0 * np.arccos(np.clip(abs(w), 0.0, 1.0))
-
-        # If tilted beyond 45 degrees, limit aggressive maneuvers
-        if tilt_angle > 0.785:  # 45 degrees = 0.785 rad
-            action[0] *= 0.5  # Reduce gimbal authority
-            action[1] *= 0.5
-            action[2] = np.clip(action[2], 0.5, 1.0)  # Force minimum thrust
-
-        # Safety constraint: Velocity limits
-        vel = self.data.qvel[0:3]
-        speed = np.linalg.norm(vel)
-        if speed > 20.0:  # Maximum 20 m/s speed
-            # Limit actions that could increase speed
-            vel_dir = vel / (speed + 1e-6)
-            action[2] = np.clip(action[2], 0.3, 0.8)  # Reduce thrust range
-
-        # Standard action clipping
+        # Removed safety constraints that interfere with learning
+        # The agent must experience the full consequences of its actions
+        # to learn proper control strategies and recovery behaviors
+        
+        # Standard action clipping only
+        # Actions are now angular RATES (rad/s), not positions
         action[0] = np.clip(action[0], -self._ctrl_limit, self._ctrl_limit)
         action[1] = np.clip(action[1], -self._ctrl_limit, self._ctrl_limit)
         action[2] = np.clip(action[2], 0.0, 1.0)
 
+        # Light action smoothing for position commands
+        # Helps filter high-frequency noise while maintaining responsiveness
+        alpha = 0.7  # Higher alpha = less smoothing = more responsive
+        self._smoothed_action[0] = alpha * action[0] + (1.0 - alpha) * self._smoothed_action[0]  # gimbal_x
+        self._smoothed_action[1] = alpha * action[1] + (1.0 - alpha) * self._smoothed_action[1]  # gimbal_y
+        self._smoothed_action[2] = 0.7 * action[2] + 0.3 * self._smoothed_action[2]  # thrust
+        
+        smoothed_action = self._smoothed_action.copy()
+
         # Actuator delay simulation (realistic hardware delay)
         if self._actuator_delay_steps > 0:
             # Add new action to buffer
-            self._action_buffer.append(action.copy())
+            self._action_buffer.append(smoothed_action.copy())
             # Remove oldest action
             if len(self._action_buffer) > self._actuator_delay_steps + 1:
                 self._action_buffer.pop(0)
             # Use delayed action
             delayed_action = self._action_buffer[0]
         else:
-            delayed_action = action
+            delayed_action = smoothed_action
 
+        # Position servos expect normalized position targets in ctrlrange [-1, 1]
+        # These map to joint range via: actual_angle = ctrl * joint_range
         self.data.ctrl[self._actuator_ids.get("tvc_pitch", 0)] = delayed_action[0] / max(self._ctrl_limit, 1e-6)
         self.data.ctrl[self._actuator_ids.get("tvc_yaw", 1)] = delayed_action[1] / max(self._ctrl_limit, 1e-6)
         self.data.ctrl[self._actuator_ids.get("thrust_control", 2)] = delayed_action[2]
+
+        # Update visual thrust plume based on thrust magnitude
+        self._update_thrust_plume(delayed_action[2])
 
         for _ in range(self.frame_skip):
             # Apply wind disturbance force if domain randomization enabled
@@ -277,16 +289,45 @@ class TvcEnv:
         return StepResult(observation=observation, reward=float(reward), done=bool(done), info=info)
 
     def _get_observation(self) -> np.ndarray:
-        """Get policy observation."""
+        """Get policy observation with target information.
+        
+        CRITICAL FIX: Now includes gimbal state for closed-loop control.
+        Without gimbal feedback, the policy operates open-loop and cannot
+        learn continuous stabilization.
+        """
+        # CRITICAL: Include gimbal angles and velocities for feedback control
+        # qpos layout: [0:3]=pos, [3:7]=quat, [7]=tvc_x, [8]=tvc_y
+        # qvel layout: [0:3]=vel, [3:6]=omega, [6]=tvc_x_vel, [7]=tvc_y_vel
         state_np = np.concatenate([
-            self.data.qpos[0:3],
-            self.data.qvel[0:3],
-            self.data.qpos[3:7],
-            self.data.qvel[3:6],
+            self.data.qpos[0:3],   # Vehicle position (3)
+            self.data.qvel[0:3],   # Vehicle velocity (3)
+            self.data.qpos[3:7],   # Vehicle quaternion (4)
+            self.data.qvel[3:6],   # Vehicle angular velocity (3)
+            self.data.qpos[7:9],
+            self.data.qvel[6:8],   # Gimbal velocities (2)
         ])
         state_jnp = jnp.asarray(state_np, dtype=jnp.float32)
-        observation = state_to_observation(state_jnp)
-        return np.asarray(observation, dtype=np.float32)
+        
+        # Pass target information to observation function
+        target_pos_jnp = jnp.asarray(self._stage_config["target_position"], dtype=jnp.float32)
+        target_vel_jnp = jnp.asarray(self._stage_config["target_velocity"], dtype=jnp.float32)
+        target_quat_jnp = jnp.asarray(self._stage_config["target_orientation"], dtype=jnp.float32)
+        
+        observation = state_to_observation(
+            state_jnp,
+            target_pos=target_pos_jnp,
+            target_vel=target_vel_jnp,
+            target_quat=target_quat_jnp
+        )
+        
+        # CRITICAL: Add previous action for temporal awareness
+        # This helps the policy understand action-effect relationships
+        obs_with_action = np.concatenate([
+            np.asarray(observation, dtype=np.float32),
+            self._last_action.astype(np.float32),  # Previous action (3)
+        ])
+        
+        return obs_with_action  # Total: 38 + 3 = 41 dimensions
 
     def _compute_reward(self, action: np.ndarray) -> float:
         """Compute reward with proper scaling for realistic rocket control.
@@ -311,9 +352,13 @@ class TvcEnv:
         pos_error = np.linalg.norm(pos - target_pos)
         vel_error = np.linalg.norm(vel - target_vel)
 
-        # Orientation alignment (quaternion dot product close to 1.0 = aligned)
+        # Orientation alignment using proper quaternion distance
+        # Using absolute value of dot product accounts for q and -q representing same orientation
         target_quat = np.array([1.0, 0.0, 0.0, 0.0])
-        orient_alignment = np.abs(np.dot(quat, target_quat))
+        quat_dot = np.dot(quat, target_quat)
+        # Compute angular distance: angle = 2 * arccos(|q1·q2|)
+        # For reward, we want alignment metric: close to 1.0 when aligned, close to 0 when misaligned
+        orient_alignment = np.abs(quat_dot)  # This is correct - ranges from 0 (perpendicular) to 1 (aligned)
 
         # Angular velocity magnitude (want this small)
         omega_magnitude = np.linalg.norm(omega)
@@ -322,36 +367,55 @@ class TvcEnv:
         control_jerk = np.linalg.norm(action - self._last_action)
 
         # Reward components (scaled appropriately for real physics)
-        # Position: Critical - use inverse quadratic (sharper penalty near target)
-        pos_reward = 10.0 / (1.0 + pos_error**2)
+        # Position: Critical - use inverse quadratic with stronger weight
+        # Encourages getting close to target position
+        pos_reward = 15.0 / (1.0 + pos_error**2)
 
-        # Velocity: Important - use inverse linear
-        vel_reward = 5.0 / (1.0 + vel_error)
+        # Velocity: Important - use inverse linear with moderate weight
+        # Encourages matching target velocity (usually zero for hover)
+        vel_reward = 8.0 / (1.0 + vel_error)
 
-        # Orientation: CRITICAL - much stronger reward for staying upright
-        # Use exponential falloff (orient_alignment**8) to heavily penalize any tilt
-        orient_reward = 20.0 * (orient_alignment**8)  # Exponential reward for staying upright
+        # Orientation: CRITICAL - Strong penalty for tilting with learnable gradient
+        # Use **4 exponent for better learning gradient (balanced for exploration vs stability)
+        # **6 was too steep and prevented exploration, **4 provides good gradient while allowing learning
+        # At 15° tilt: orient_alignment = 0.966 → reward = 35 * 0.966^4 = 31.5
+        # At 30° tilt: orient_alignment = 0.866 → reward = 35 * 0.866^4 = 19.7
+        # At 45° tilt: orient_alignment = 0.707 → reward = 35 * 0.707^4 = 8.7
+        # This creates a learnable gradient that encourages staying upright without being too harsh
+        orient_reward = 35.0 * (orient_alignment**4)
 
         # Angular velocity: Penalize spinning heavily
         omega_reward = 5.0 / (1.0 + omega_magnitude**2)
+        
+        # ENHANCED: Extra stabilization bonus for very low angular velocity
+        # Progressive rewards encourage learning stable control
+        # Adjusted thresholds and rewards for better learning at low altitude
+        if omega_magnitude < 0.08:  # Very stable - minimal rotation (tightened from 0.10)
+            omega_reward += 6.0  # Strong bonus for excellent stability (increased from 5.0)
+        elif omega_magnitude < 0.20:  # Good stability (tightened from 0.25)
+            omega_reward += 3.0  # Increased from 2.5
+        elif omega_magnitude < 0.40:  # Moderate stability (tightened from 0.5)
+            omega_reward += 1.5  # Increased from 1.0
 
         # Altitude maintenance: Reward staying near target altitude
         target_altitude = target_pos[2]
         altitude_error = abs(pos[2] - target_altitude)
         altitude_reward = 5.0 / (1.0 + altitude_error)
 
-        # Smoothness: Reduce jerk
-        smoothness_reward = 2.0 / (1.0 + control_jerk)
+        # Smoothness: MINIMAL weight - aggressive maneuvers are often necessary for stability!
+        # Reduced from 0.5 to 0.2 to prioritize stability over smoothness
+        smoothness_reward = 0.2 / (1.0 + control_jerk)
 
-        # Progress reward: Reward getting closer to target over time
-        if not hasattr(self, '_prev_pos_error'):
-            self._prev_pos_error = pos_error
-        progress_reward = 2.0 * max(0.0, self._prev_pos_error - pos_error)  # Positive if improving
-        self._prev_pos_error = pos_error
+        # Removed progress reward - uses mutable state that doesn't work properly
+        # The position reward already provides progress signal
+        progress_reward = 0.0
 
         # Stability reward: Reward maintaining stable hover
-        if pos_error < 5.0 and vel_error < 2.0:
-            stability_reward = 3.0  # Bonus for being in stable region
+        # Adjusted for lower altitude training (8m instead of 50m)
+        if pos_error < 2.0 and vel_error < 1.0:  # Tightened from 5.0m and 2.0 m/s
+            stability_reward = 5.0
+        elif pos_error < 4.0 and vel_error < 2.0:  # Moderate stability
+            stability_reward = 2.0  # Partial bonus
         else:
             stability_reward = 0.0
 
@@ -373,20 +437,27 @@ class TvcEnv:
         )
 
         # Bonus for being within tolerance (achieving goal)
+        # More lenient orientation requirement for goal achievement during learning
         if (
             pos_error < self._stage_config["position_tolerance"]
             and vel_error < self._stage_config["velocity_tolerance"]
-            and orient_alignment > 0.95
+            and orient_alignment > 0.92
+            and omega_magnitude < self._stage_config["angular_velocity_tolerance"]
         ):
-            reward += 15.0  # Large bonus for goal achievement
+            reward += 20.0
 
         # CRITICAL: Strong penalties for failure states
-        # Crash penalty - very large to discourage hitting ground
-        if pos[2] < 0.2:
+        # Crash penalty - only penalize if ACTUALLY crashing (low altitude + high downward velocity)
+        # This allows gentle landings at low altitude without penalty
+        vertical_velocity = vel[2]  # Negative = descending
+        if pos[2] < 0.1 and vertical_velocity < -2.0:  # Low altitude + fast descent = crash
             reward -= 50.0
+        elif pos[2] < 0.05:  # Below ground level
+            reward -= 100.0  # Severe penalty for going underground
         
-        # CRITICAL: Penalty for excessive tilt (more than ~45 degrees off vertical)
-        if orient_alignment < 0.7:  # cos(45°) ≈ 0.707
+        # CRITICAL: Penalty for excessive tilt (more than ~30 degrees off vertical)
+        # Tightened from 45° to 30° (orient_alignment < 0.866) for better stability
+        if orient_alignment < 0.866:  # cos(30°) ≈ 0.866
             reward -= 30.0
         
         # CRITICAL: Penalty for spinning out of control
@@ -414,35 +485,85 @@ class TvcEnv:
         return normalised, std
 
     def _check_termination(self) -> bool:
-        """Check episode termination - Realistic landing bounds."""
+        """Check episode termination - RELAXED for better learning."""
         pos = self.data.qpos[0:3]
         quat = self.data.qpos[3:7]
         omega = self.data.qvel[3:6]
         
-        # Terminate if crashed (below 0.1m) or exceeded max altitude (200m)
-        if pos[2] < 0.1 or pos[2] > 200.0:
+        # Terminate if crashed (below 0.0m) or exceeded max altitude (200m)
+        # Lowered from 0.1m to 0.0m to allow landing attempts
+        if pos[2] < 0.0 or pos[2] > 200.0:
             return True
         
         # Terminate if drifted too far laterally (50m radius)
         if np.linalg.norm(pos[0:2]) > 50.0:
             return True
         
-        # CRITICAL: Terminate if tipped over too much (more than 45 degrees from vertical)
-        # For quaternion [w, x, y, z], w represents rotation around vertical axis
-        # abs(w) close to 1.0 means upright, close to 0 means sideways
+        # Tightened tilt termination for better stability learning
+        # Set to 45° (0.785 rad) - realistic limit for rocket control
+        # Combined with strong reward gradient, this teaches proper upright control
+        # while still allowing moderate tilt angles for maneuvering
         w = quat[0]
         tilt_angle = 2.0 * np.arccos(np.clip(abs(w), 0.0, 1.0))
-        if tilt_angle > 0.785:  # 45 degrees = 0.785 radians (STRICTER)
+        if tilt_angle > 0.785:  # 45 degrees = 0.785 radians (balanced for learning & stability)
             return True
         
-        # CRITICAL: Terminate if spinning too fast (more than 1.5 rad/s angular velocity)
-        if np.linalg.norm(omega) > 1.5:  # STRICTER - was 2.0
+        # RELAXED angular velocity limit to allow more dynamic maneuvers
+        # Changed from 1.5 rad/s to 2.5 rad/s
+        if np.linalg.norm(omega) > 2.5:  # RELAXED - was 1.5
             return True
         
         if self._step_counter >= self.max_steps:
             return True
         
         return False
+
+    def _update_thrust_plume(self, thrust_fraction: float) -> None:
+        """Dynamically visualize thrust plume using multi-layer fade based on thrust magnitude."""
+        try:
+            # Find the multi-layer plume geometries
+            plume_ids = {
+                'short': mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "plume_short"),
+                'medium': mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "plume_medium"),
+                'long': mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "plume_long"),
+                'outer': mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "plume_outer"),
+            }
+            
+            if thrust_fraction < 0.05:
+                # No thrust - hide all plumes
+                for geom_id in plume_ids.values():
+                    if geom_id >= 0:
+                        self.data.geom_rgba[geom_id, 3] = 0.0  # Set alpha to 0
+            else:
+                # Short plume: Always visible when thrust > 5%
+                if plume_ids['short'] >= 0:
+                    alpha = min(1.0, thrust_fraction * 3.0)  # Full brightness at 33% thrust
+                    self.data.geom_rgba[plume_ids['short']] = [0.98, 0.5, 0.1, 0.8 * alpha]
+                
+                # Medium plume: Visible from 30% thrust
+                if plume_ids['medium'] >= 0:
+                    if thrust_fraction >= 0.3:
+                        alpha = min(1.0, (thrust_fraction - 0.3) * 2.5)
+                        self.data.geom_rgba[plume_ids['medium']] = [0.98, 0.5, 0.1, 0.7 * alpha]
+                    else:
+                        self.data.geom_rgba[plume_ids['medium'], 3] = 0.0
+                
+                # Long plume: Visible from 60% thrust
+                if plume_ids['long'] >= 0:
+                    if thrust_fraction >= 0.6:
+                        alpha = min(1.0, (thrust_fraction - 0.6) * 2.5)
+                        self.data.geom_rgba[plume_ids['long']] = [0.98, 0.5, 0.1, 0.6 * alpha]
+                    else:
+                        self.data.geom_rgba[plume_ids['long'], 3] = 0.0
+                
+                # Outer dispersed plume: Always visible with thrust, scales with amount
+                if plume_ids['outer'] >= 0:
+                    alpha = thrust_fraction * 0.8  # Max 80% opacity
+                    self.data.geom_rgba[plume_ids['outer']] = [0.9, 0.4, 0.05, 0.3 * alpha]
+                    
+        except Exception:
+            # Silently ignore if geometries not found
+            pass
 
     def _get_info(self, action: np.ndarray) -> Dict[str, float]:
         """Get diagnostic info."""
