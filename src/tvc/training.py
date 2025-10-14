@@ -227,6 +227,7 @@ def _collect_rollout(
             pos = env.data.qpos[0:3]
             vel = env.data.qvel[0:3]
             quat = env.data.qpos[3:7]
+            omega = env.data.qvel[3:6]
             target_pos = np.array(stage.target_position, dtype=np.float32)
             target_vel = np.array(stage.target_velocity, dtype=np.float32)
             target_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
@@ -234,12 +235,14 @@ def _collect_rollout(
             pos_error = float(np.linalg.norm(pos - target_pos))
             vel_error = float(np.linalg.norm(vel - target_vel))
             orient_alignment = float(np.abs(np.dot(quat, target_quat)))
+            angular_vel_mag = float(np.linalg.norm(omega))
 
-            # Evaluate success at episode end
+            # Evaluate success at episode end - MUST be stable and upright
             episode_success = (
                 pos_error < stage.position_tolerance and
                 vel_error < stage.velocity_tolerance and
-                orient_alignment > 0.95
+                orient_alignment > 0.98 and  # Stricter: within ~11 degrees
+                angular_vel_mag < stage.angular_velocity_tolerance  # Must not be spinning
             )
 
             episode_successes.append(episode_success)
