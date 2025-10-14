@@ -38,20 +38,21 @@ def build_curriculum() -> List[CurriculumStage]:
     Realistic velocities based on F9 landing profile (scaled to model).
     """
 
-    # Stage 1: High hover stabilization at 50m (extended for proper learning)
+    # Stage 1: LOW hover stabilization at 8m (CRITICAL FIX: Reduced from 50m for learnable initial training)
+    # Starting at 8m makes initial stabilization much more achievable
     hover_stage = CurriculumStage(
         name="hover_stabilization",
         episodes=300,  # Increased from 200 for better learning
-        target_position=(0.0, 0.0, 50.0),
+        target_position=(0.0, 0.0, 8.0),  # 8m instead of 50m
         target_orientation=(1.0, 0.0, 0.0, 0.0),  # upright
         target_velocity=(0.0, 0.0, 0.0),
         target_angular_velocity=(0.0, 0.0, 0.0),
-        initial_position=(0.0, 0.0, 50.0),
+        initial_position=(0.0, 0.0, 8.0),  # 8m instead of 50m
         initial_velocity=(0.0, 0.0, 0.0),
         initial_orientation=(1.0, 0.0, 0.0, 0.0),
         initial_angular_velocity=(0.0, 0.0, 0.0),
-        position_tolerance=2.0,  # Stricter: must stay within 2m
-        velocity_tolerance=1.0,  # Stricter: must be nearly stationary
+        position_tolerance=1.0,  # Tightened from 2.0m - more precise at lower altitude
+        velocity_tolerance=0.8,  # Tightened from 1.0 for better stability
         orientation_tolerance=0.15,  # Stricter orientation requirement
         angular_velocity_tolerance=0.3,  # CRITICAL: Must not be spinning (was 0.5)
         tolerance_bonus=0.5,
@@ -60,20 +61,21 @@ def build_curriculum() -> List[CurriculumStage]:
         min_episodes=100,  # Increased minimum
     )
 
-    # Stage 2: Lateral translation with offset (10m lateral at 50m altitude)
+    # Stage 2: Lateral translation with offset (5m lateral at 8m altitude)
+    # Reduced from 10m offset at 50m to 5m offset at 8m for progressive difficulty
     lateral_stage = CurriculumStage(
         name="lateral_translation",
         episodes=180,
-        target_position=(0.0, 0.0, 50.0),
+        target_position=(0.0, 0.0, 8.0),  # 8m altitude
         target_orientation=(1.0, 0.0, 0.0, 0.0),
         target_velocity=(0.0, 0.0, 0.0),
         target_angular_velocity=(0.0, 0.0, 0.0),
-        initial_position=(10.0, 0.0, 50.0),
-        initial_velocity=(-1.5, 0.0, 0.0),  # ~5.4 km/h lateral velocity
+        initial_position=(5.0, 0.0, 8.0),  # 5m lateral offset (was 10m)
+        initial_velocity=(-1.0, 0.0, 0.0),  # Reduced from -1.5 m/s
         initial_orientation=(1.0, 0.0, 0.0, 0.0),
         initial_angular_velocity=(0.0, 0.0, 0.0),
-        position_tolerance=2.5,
-        velocity_tolerance=1.2,
+        position_tolerance=1.5,  # Tightened from 2.5m
+        velocity_tolerance=1.0,  # Tightened from 1.2
         orientation_tolerance=0.15,
         angular_velocity_tolerance=0.4,
         tolerance_bonus=0.6,
@@ -82,20 +84,21 @@ def build_curriculum() -> List[CurriculumStage]:
         min_episodes=50,
     )
 
-    # Stage 3: Altitude climb (50m → 80m)
+    # Stage 3: Altitude climb (8m → 30m)
+    # Progressive altitude increase from 8m to 30m (was 50m → 80m)
     climb_stage = CurriculumStage(
         name="altitude_climb",
         episodes=160,
-        target_position=(0.0, 0.0, 80.0),
+        target_position=(0.0, 0.0, 30.0),  # 30m target
         target_orientation=(1.0, 0.0, 0.0, 0.0),
         target_velocity=(0.0, 0.0, 0.0),
         target_angular_velocity=(0.0, 0.0, 0.0),
-        initial_position=(0.0, 0.0, 50.0),
-        initial_velocity=(0.0, 0.0, 2.0),  # 2 m/s climb rate
+        initial_position=(0.0, 0.0, 8.0),  # Start from 8m
+        initial_velocity=(0.0, 0.0, 1.5),  # Reduced from 2.0 m/s
         initial_orientation=(1.0, 0.0, 0.0, 0.0),
         initial_angular_velocity=(0.0, 0.0, 0.0),
-        position_tolerance=3.0,
-        velocity_tolerance=1.5,
+        position_tolerance=2.5,  # Tightened from 3.0
+        velocity_tolerance=1.2,  # Tightened from 1.5
         orientation_tolerance=0.15,
         angular_velocity_tolerance=0.4,
         tolerance_bonus=0.55,
@@ -104,20 +107,21 @@ def build_curriculum() -> List[CurriculumStage]:
         min_episodes=45,
     )
 
-    # Stage 4: Controlled descent (80m → 20m) - Main landing burn phase
+    # Stage 4: Controlled descent (30m → 8m) - Main landing burn phase
+    # Adjusted to work with lower altitude progression
     descent_stage = CurriculumStage(
         name="controlled_descent",
         episodes=200,
-        target_position=(0.0, 0.0, 20.0),
+        target_position=(0.0, 0.0, 8.0),  # Return to 8m hover
         target_orientation=(1.0, 0.0, 0.0, 0.0),
         target_velocity=(0.0, 0.0, 0.0),
         target_angular_velocity=(0.0, 0.0, 0.0),
-        initial_position=(0.0, 0.0, 80.0),
-        initial_velocity=(0.0, 0.0, -3.0),  # -3 m/s descent rate
+        initial_position=(0.0, 0.0, 30.0),  # Start from 30m
+        initial_velocity=(0.0, 0.0, -2.0),  # Reduced from -3.0 m/s
         initial_orientation=(1.0, 0.0, 0.0, 0.0),
         initial_angular_velocity=(0.0, 0.0, 0.0),
-        position_tolerance=2.0,
-        velocity_tolerance=1.0,
+        position_tolerance=1.5,  # Tightened from 2.0
+        velocity_tolerance=0.8,  # Tightened from 1.0
         orientation_tolerance=0.12,
         angular_velocity_tolerance=0.3,
         tolerance_bonus=0.65,
@@ -126,20 +130,21 @@ def build_curriculum() -> List[CurriculumStage]:
         min_episodes=70,
     )
 
-    # Stage 5: Final landing approach (20m → 2m) - Precision landing
+    # Stage 5: Final landing approach (8m → 2m) - Precision landing
+    # Adjusted to work with lower altitude progression
     landing_stage = CurriculumStage(
         name="landing_approach",
         episodes=220,
         target_position=(0.0, 0.0, 2.0),
         target_orientation=(1.0, 0.0, 0.0, 0.0),
-        target_velocity=(0.0, 0.0, -0.5),  # Slow descent -0.5 m/s
+        target_velocity=(0.0, 0.0, -0.3),  # Slower descent -0.3 m/s (was -0.5)
         target_angular_velocity=(0.0, 0.0, 0.0),
-        initial_position=(0.0, 0.0, 20.0),
-        initial_velocity=(0.0, 0.0, -2.0),  # -2 m/s initial descent
+        initial_position=(0.0, 0.0, 8.0),  # Start from 8m (was 20m)
+        initial_velocity=(0.0, 0.0, -1.0),  # Reduced from -2.0 m/s
         initial_orientation=(1.0, 0.0, 0.0, 0.0),
         initial_angular_velocity=(0.0, 0.0, 0.0),
-        position_tolerance=1.0,
-        velocity_tolerance=0.8,
+        position_tolerance=0.8,  # Tightened from 1.0
+        velocity_tolerance=0.6,  # Tightened from 0.8
         orientation_tolerance=0.08,
         angular_velocity_tolerance=0.2,
         tolerance_bonus=0.7,
