@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Tuple
 
 import jax
 import jax.numpy as jnp
+import mujoco.viewer
 import numpy as np
 import optax
 from flax import serialization
@@ -165,6 +166,7 @@ def _collect_rollout(
     funcs: PolicyFunctions,
     config: TrainingConfig,
     normalize_rewards: bool = True,
+    viewer: mujoco.viewer.Viewer | None = None,
 ) -> Tuple[Dict[str, jnp.ndarray], Dict[str, float]]:
     """Collect rollout trajectory with optional reward normalization."""
     env.configure_stage(stage)
@@ -210,6 +212,9 @@ def _collect_rollout(
 
         action_np = np.asarray(action, dtype=np.float32)
         step_result = env.step(action_np)
+
+        if viewer:
+            viewer.sync()
 
         reward_buffer.append(step_result.reward)
         done_buffer.append(1.0 if step_result.done else 0.0)
@@ -511,6 +516,7 @@ def train_controller(
     output_dir: Path | None = None,
     seed: int = 42,
     resume_from: Path | None = None,  # Resume from checkpoint
+    visualize: bool = False,
 ) -> TrainingState:
     """Enhanced PPO + Evolution training with visualization."""
 
@@ -597,6 +603,12 @@ def train_controller(
     current_entropy_coef = config.entropy_coef
     start_time = time.time()
 
+    # Initialize viewer if visualization is enabled
+    viewer = None
+    if visualize:
+        viewer = mujoco.viewer.launch_passive(env.model, env.data)
+        LOGGER.info("🎥 Live visualization enabled - MuJoCo viewer launched")
+
     # Training loop
     for episode in range(start_episode, total_episodes):
         episode_start = time.time()
@@ -606,7 +618,7 @@ def train_controller(
         stage = curriculum[stage_idx]
 
         # Collect rollout
-        batch, rollout_stats = _collect_rollout(env, stage, state, policy_funcs, config)
+        batch, rollout_stats = _collect_rollout(env, stage, state, policy_funcs, config, viewer=viewer)
 
         # PPO update
         state, update_metrics = _ppo_update(state, batch, optimizer, policy_funcs, config, current_entropy_coef)
