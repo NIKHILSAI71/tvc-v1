@@ -9,3 +9,4 @@ tests/
 training/
 MUJOCO_LOG.txt
 tvc_output/
+research-paper/
