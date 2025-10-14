@@ -427,16 +427,16 @@ class TvcEnv:
         if np.linalg.norm(pos[0:2]) > 50.0:
             return True
         
-        # CRITICAL: Terminate if tipped over too much (more than 60 degrees from vertical)
+        # CRITICAL: Terminate if tipped over too much (more than 45 degrees from vertical)
         # For quaternion [w, x, y, z], w represents rotation around vertical axis
         # abs(w) close to 1.0 means upright, close to 0 means sideways
         w = quat[0]
         tilt_angle = 2.0 * np.arccos(np.clip(abs(w), 0.0, 1.0))
-        if tilt_angle > 1.047:  # 60 degrees = 1.047 radians
+        if tilt_angle > 0.785:  # 45 degrees = 0.785 radians (STRICTER)
             return True
         
-        # CRITICAL: Terminate if spinning too fast (more than 2 rad/s angular velocity)
-        if np.linalg.norm(omega) > 2.0:
+        # CRITICAL: Terminate if spinning too fast (more than 1.5 rad/s angular velocity)
+        if np.linalg.norm(omega) > 1.5:  # STRICTER - was 2.0
             return True
         
         if self._step_counter >= self.max_steps:
