@@ -48,14 +48,14 @@ class PolicyConfig:
     """Policy network configuration for 3D TVC."""
     hidden_dims: Tuple[int, ...] = (512, 512, 256, 128)
     activation: Callable[[jnp.ndarray], jnp.ndarray] = nn.silu
-    log_std_init: float = -0.5  # Increased from -2.0 for better initial exploration
-    log_std_min: float = -2.5  # Relaxed from -4.0 to prevent extreme compression
-    log_std_max: float = 0.5   # Increased from -1.2 for healthy entropy
+    log_std_init: float = -0.3
+    log_std_min: float = -2.5   # Allow tighter control when converged
+    log_std_max: float = 0.3    # Allow higher exploration (std up to 1.35)
     dropout_rate: float = 0.0
     use_layer_norm: bool = True
-    action_limit: float = 0.3  # TVC gimbal limit
-    thrust_limit: float = 1.0  # Thrust fraction [0, 1]
-    action_dims: int = 3  # 3D: [gimbal_x, gimbal_y, thrust]
+    action_limit: float = 0.14  # Gimbal angle limit (±8° = 0.14 rad)
+    thrust_limit: float = 1.0   # Thrust fraction [0, 1]
+    action_dims: int = 3        # 3D: [gimbal_x_angle, gimbal_y_angle, thrust]
 
 
 class ActorCritic(nn.Module):
