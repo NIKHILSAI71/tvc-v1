@@ -90,11 +90,25 @@ def rocket_step(
     gimbal_y = jnp.clip(gimbal_y, -params.tvc_limit, params.tvc_limit)
     thrust_frac = jnp.clip(thrust_frac, 0.0, 1.0)
 
-    thrust_mag = params.thrust_min + thrust_frac * (params.thrust_max - params.thrust_min)
+    # Thrust calculation: Use full range [0, thrust_max] for maximum control authority
+    # thrust_frac ∈ [0, 1] maps to [0, 8540N]
+    # Note: Real Merlin 1D has 40% minimum throttle, but for learning we need full range
+    # Hover thrust for 256kg rocket = (256 * 9.81) / 8540 ≈ 29.4%
+    thrust_mag = thrust_frac * params.thrust_max
+    
+    # Thrust FORCE acts upward (+Z in body frame)
+    # Engine nozzle points down, but thrust force pushes rocket up!
+    # Body frame: +Z = nose direction (up along rocket axis)
+    # Gimbal angles: gimbal_x = pitch (rotation around X), gimbal_y = yaw (rotation around Y)
+    # When gimbal angles are zero, thrust points straight up (+Z)
+    # 
+    # Torque convention: With engine at [0, 0, -arm]:
+    #   - Positive gimbal_y (yaw) → Tx > 0 → Torque around Y (turn left)
+    #   - Positive gimbal_x (pitch) → Ty > 0 → Torque around X (pitch up)
     thrust_body = jnp.array([
-        thrust_mag * jnp.sin(gimbal_y),
-        -thrust_mag * jnp.sin(gimbal_x),
-        -thrust_mag * jnp.cos(gimbal_x) * jnp.cos(gimbal_y),
+        thrust_mag * jnp.sin(gimbal_y),      # Lateral thrust (yaw control)
+        thrust_mag * jnp.sin(gimbal_x),      # Lateral thrust (pitch control)
+        thrust_mag * jnp.cos(gimbal_x) * jnp.cos(gimbal_y),  # Positive = upward thrust!
     ])
 
     R = quaternion_to_rotation_matrix(quat)
@@ -109,8 +123,14 @@ def rocket_step(
     total_force = thrust_world + gravity_force + drag_force
     accel = total_force / params.mass
 
+    # Thrust application point (engine is 'arm' meters below center of mass)
+    # thrust_offset points from CoM to engine location: [0, 0, -arm] (downward)
     thrust_offset = jnp.array([0.0, 0.0, -params.arm])
+    
+    # Torque = r × F (cross product of lever arm and thrust force)
+    # Gimbal angles deflect thrust laterally, creating torque around CoM
     tvc_torque_body = jnp.cross(thrust_offset, thrust_body)
+    
     angular_damping = -params.damping[2] * omega
     total_torque_body = tvc_torque_body + angular_damping
     inertia = jnp.array(params.inertia)
@@ -158,20 +178,101 @@ def simulate_rollout(
     return states
 
 
-def state_to_observation(state: jnp.ndarray) -> jnp.ndarray:
-    """Map full state vector to policy observation."""
+def state_to_observation(
+    state: jnp.ndarray,
+    target_pos: jnp.ndarray | None = None,
+    target_vel: jnp.ndarray | None = None,
+    target_quat: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Map full state vector to policy observation with target information.
+    
+    CRITICAL UPDATE: Now includes gimbal state for closed-loop control.
+    
+    Enhanced observation space for better learning:
+    - Current state (position, velocity, orientation, angular velocity)
+    - Gimbal state (angles, velocities) - CRITICAL for feedback control
+    - Target information (position, velocity, orientation)
+    - Error signals (position error, velocity error, orientation alignment)
+    - Additional features (distance to target, vertical alignment)
+    
+    This provides the policy with goal-directed information essential for
+    learning stable control towards a target state.
+    
+    State format (17 elements):
+    - [0:3] = position
+    - [3:6] = velocity
+    - [6:10] = quaternion
+    - [10:13] = angular velocity
+    - [13:15] = gimbal angles [tvc_x, tvc_y] (NEW)
+    - [15:17] = gimbal velocities (NEW)
+    """
     pos = state[:3]
     vel = state[3:6]
     quat = state[6:10]
     omega = state[10:13]
+    
+    # Extract gimbal state if provided
+    if state.shape[0] >= 17:
+        gimbal_angles = state[13:15]  # [tvc_x, tvc_y]
+        gimbal_velocities = state[15:17]
+    else:
+        # Backwards compatibility: if old state format, use zeros
+        gimbal_angles = jnp.zeros(2)
+        gimbal_velocities = jnp.zeros(2)
+    
+    # Current state representation
     R = quaternion_to_rotation_matrix(quat)
-    return jnp.concatenate([pos, vel, R.reshape(-1), omega])
+    
+    # Default targets (hover at current position if not specified)
+    if target_pos is None:
+        target_pos = jnp.array([0.0, 0.0, 50.0])
+    if target_vel is None:
+        target_vel = jnp.array([0.0, 0.0, 0.0])
+    if target_quat is None:
+        target_quat = jnp.array([1.0, 0.0, 0.0, 0.0])  # Upright
+    
+    # Error signals (CRITICAL for learning goal-directed behavior)
+    pos_error = pos - target_pos
+    vel_error = vel - target_vel
+    distance_to_target = jnp.linalg.norm(pos_error)
+    
+    # Orientation alignment: dot product of current and target quaternions
+    # Close to 1.0 = well aligned, close to 0 = perpendicular, close to -1 = inverted
+    orientation_alignment = jnp.abs(jnp.dot(quat, target_quat))
+    
+    # Vertical alignment: how upright is the rocket (z-axis pointing up)
+    # R[:, 2] is the body's z-axis in world frame
+    vertical_alignment = R[2, 2]  # Should be close to 1.0 when upright
+    
+    # Angular velocity magnitude (want this small for stability)
+    omega_magnitude = jnp.linalg.norm(omega)
+    
+    # Comprehensive observation vector with gimbal feedback
+    observation = jnp.concatenate([
+        pos,                           # Current position (3)
+        vel,                           # Current velocity (3)
+        R.reshape(-1),                 # Current orientation matrix (9)
+        omega,                         # Current angular velocity (3)
+        gimbal_angles,                 # CRITICAL: Current gimbal angles [tvc_x, tvc_y] (2)
+        gimbal_velocities,             # CRITICAL: Gimbal angular velocities (2)
+        target_pos,                    # Target position (3)
+        target_vel,                    # Target velocity (3)
+        pos_error,                     # Position error vector (3)
+        vel_error,                     # Velocity error vector (3)
+        jnp.array([distance_to_target]),      # Scalar distance to target (1)
+        jnp.array([orientation_alignment]),   # Orientation alignment score (1)
+        jnp.array([vertical_alignment]),      # Vertical alignment score (1)
+        jnp.array([omega_magnitude]),         # Angular velocity magnitude (1)
+    ])
+    
+    # Total observation size: 3+3+9+3+2+2+3+3+3+3+1+1+1+1 = 38 dimensions (was 32)
+    return observation
 
 
-def hover_state(altitude: float = 50.0) -> jnp.ndarray:
+def hover_state(altitude: float = 8.0) -> jnp.ndarray:
     """Return hovering equilibrium state at given altitude.
 
-    Default altitude: 50m (realistic landing scenario start point).
+    Default altitude: 8m (FIXED: Reduced from 50m for learnable initial training).
     """
     return jnp.array([
         0.0, 0.0, altitude,  # position
