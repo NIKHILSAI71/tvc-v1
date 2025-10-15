@@ -35,7 +35,7 @@ class TvcEnv:
         model_path: str | None = None,
         dt: float = 0.02,
         ctrl_limit: float = 0.14,  # Gimbal angle limit (±8° = 0.14 rad)
-        max_steps: int = 1000,  # Reduced from 2000 for faster initial learning
+        max_steps: int = 300,  # CRITICAL: Reduced to 300 (6 seconds) for rapid learning
         seed: int | None = None,
         domain_randomization: bool = True,  # Enable robust training
         actuator_delay_steps: int = 0,  # Actuator delay (0 = no delay, 1-3 = realistic)
@@ -239,9 +239,11 @@ class TvcEnv:
         action[1] = np.clip(action[1], -self._ctrl_limit, self._ctrl_limit)
         action[2] = np.clip(action[2], 0.0, 1.0)
 
-        # Light action smoothing for position commands
+        # Action smoothing for position commands
         # Helps filter high-frequency noise while maintaining responsiveness
-        alpha = 0.7  # Higher alpha = less smoothing = more responsive
+        # CRITICAL: alpha=0.7 provides fast response needed for learning
+        # Lower values (0.5, 0.3) create delayed consequences that break learning!
+        alpha = 0.7  # 70% new action, 30% old - optimal for learning
         self._smoothed_action[0] = alpha * action[0] + (1.0 - alpha) * self._smoothed_action[0]  # gimbal_x
         self._smoothed_action[1] = alpha * action[1] + (1.0 - alpha) * self._smoothed_action[1]  # gimbal_y
         self._smoothed_action[2] = 0.7 * action[2] + 0.3 * self._smoothed_action[2]  # thrust
@@ -419,83 +421,82 @@ class TvcEnv:
         else:
             stability_reward = 0.0
 
-        # CRITICAL FIX: Thrust guidance reward to teach proper throttle control
-        # For a 256kg rocket with gravity 9.81 m/s², hover thrust = (256 * 9.81) / 8540 ≈ 0.294
-        # This reward guides the policy to use appropriate thrust based on vertical state
-        hover_thrust = 0.294  # Theoretical hover thrust fraction
+        # SIMPLIFIED thrust guidance: Reward using appropriate thrust for altitude control
+        # For initial learning, keep it simple - just encourage thrust usage
         thrust_action = float(action[2])  # Thrust command [0, 1]
-        
-        # Compute desired thrust based on vertical state
+        vertical_velocity = vel[2]  # Positive = ascending, negative = descending
         altitude_error_z = pos[2] - target_altitude
-        vertical_velocity = vel[2]
         
-        # Desired thrust adjustment from hover point
-        # If below target: need more thrust (> 0.294)
-        # If above target: need less thrust (< 0.294)
-        # Scale by errors to provide smooth gradient
-        altitude_correction = -0.15 * np.clip(altitude_error_z / 5.0, -1.0, 1.0)  # ±15% adjustment
-        velocity_correction = -0.10 * np.clip(vertical_velocity / 2.0, -1.0, 1.0)  # ±10% adjustment
-        desired_thrust = hover_thrust + altitude_correction + velocity_correction
-        desired_thrust = np.clip(desired_thrust, 0.15, 0.60)  # Keep in reasonable range
+        # Simple thrust guidance: 
+        # - If falling (vel_z < 0) and below target, reward high thrust
+        # - If rising (vel_z > 0) and above target, reward low thrust
+        # - If near target with low velocity, reward moderate thrust
         
-        # Reward thrust being near desired value (inverted quadratic penalty)
-        thrust_error = abs(thrust_action - desired_thrust)
-        thrust_guidance_reward = 8.0 / (1.0 + thrust_error * 10.0)  # Peak reward when error=0
+        # Base thrust reward - encourage using thrust (prevents zero-thrust collapse)
+        if thrust_action > 0.2:  # Using reasonable thrust
+            thrust_guidance_reward = 5.0
+        else:
+            thrust_guidance_reward = -5.0  # Penalty for not using thrust
         
-        # Extra bonus for using ANY thrust when near hover state (prevents zero-thrust collapse)
-        if pos_error < 3.0 and abs(vertical_velocity) < 1.5:  # Near hover conditions
-            if thrust_action > 0.15:  # Using significant thrust
-                thrust_guidance_reward += 3.0  # Bonus for not giving up
-            else:  # Using very little thrust (< 15%)
-                thrust_guidance_reward -= 5.0  # Penalty for zero-thrust behavior
+        # Bonus for thrust in correct direction relative to altitude error
+        if altitude_error_z < -1.0 and thrust_action > 0.4:  # Below target, use high thrust
+            thrust_guidance_reward += 5.0
+        elif altitude_error_z > 1.0 and thrust_action < 0.5:  # Above target, reduce thrust
+            thrust_guidance_reward += 3.0
+        elif abs(altitude_error_z) < 1.0 and 0.3 < thrust_action < 0.6:  # Near target, moderate thrust
+            thrust_guidance_reward += 4.0
         
-        # Fuel efficiency: REMOVED for hover task (conflicts with maintaining altitude)
-        # Hover requires sustained thrust near 1.0, penalizing it is counterproductive
-        fuel_reward = 0.0  # Disabled
+        fuel_reward = 0.0  # Disabled for hover task
 
-        # Combined reward (unnormalized, scales ~0-50 with shaping and thrust guidance)
+        # Combined reward (dense, shaped, scales ~0-80 per step)
         reward = (
-            pos_reward +
-            vel_reward +
-            orient_reward +
-            omega_reward +
-            altitude_reward +
-            smoothness_reward +
-            progress_reward +
-            stability_reward +
-            fuel_reward +
-            thrust_guidance_reward  # CRITICAL: Teaches proper thrust control
+            pos_reward +           # ~15 max
+            vel_reward +           # ~8 max
+            orient_reward +        # ~35 max
+            omega_reward +         # ~5-11 with bonuses
+            altitude_reward +      # ~5 max
+            smoothness_reward +    # ~0.2 max
+            progress_reward +      # 0
+            stability_reward +     # ~5 max
+            fuel_reward +          # 0
+            thrust_guidance_reward  # ~5-10 with bonuses
         )
 
-        # Bonus for being within tolerance (achieving goal)
-        # More lenient orientation requirement for goal achievement during learning
+        # CRITICAL: Success bonus - large reward for achieving goal state
+        # This provides strong learning signal for successful behavior
         if (
             pos_error < self._stage_config["position_tolerance"]
             and vel_error < self._stage_config["velocity_tolerance"]
-            and orient_alignment > 0.92
+            and orient_alignment > 0.95  # Within ~18 degrees
             and omega_magnitude < self._stage_config["angular_velocity_tolerance"]
         ):
-            reward += 20.0
+            reward += 50.0  # Significant success bonus (increased from 20.0)
 
-        # CRITICAL: Strong penalties for failure states
-        # Crash penalty - only penalize if ACTUALLY crashing (low altitude + high downward velocity)
-        # This allows gentle landings at low altitude without penalty
+        # CRITICAL: Strong penalties for failure states to teach avoidance
         vertical_velocity = vel[2]  # Negative = descending
-        if pos[2] < 0.1 and vertical_velocity < -2.0:  # Low altitude + fast descent = crash
-            reward -= 50.0
-        elif pos[2] < 0.05:  # Below ground level
-            reward -= 100.0  # Severe penalty for going underground
         
-        # CRITICAL: Penalty for excessive tilt (more than ~30 degrees off vertical)
-        # Tightened from 45° to 30° (orient_alignment < 0.866) for better stability
-        if orient_alignment < 0.866:  # cos(30°) ≈ 0.866
-            reward -= 30.0
+        # Crash penalty - severe
+        if pos[2] < 0.05:  # Below ground
+            reward -= 200.0  # Very severe penalty (increased from 100.0)
+        elif pos[2] < 0.2 and vertical_velocity < -2.0:  # Low + fast descent = imminent crash
+            reward -= 100.0  # Severe penalty (increased from 50.0)
         
-        # CRITICAL: Penalty for spinning out of control
-        if omega_magnitude > 1.0:
-            reward -= 20.0
+        # Excessive tilt penalty - moderate (allow some tilt for maneuvering)
+        if orient_alignment < 0.866:  # > 30 degrees tilt
+            reward -= 50.0  # Increased from 30.0
+        elif orient_alignment < 0.94:  # > 20 degrees tilt
+            reward -= 10.0  # Gentle warning penalty
+        
+        # Spinning penalty
+        if omega_magnitude > 1.5:  # Excessive spinning
+            reward -= 40.0  # Increased from 20.0
+        elif omega_magnitude > 1.0:  # High angular velocity
+            reward -= 15.0  # Gentle warning
 
-        # Don't normalize - let PPO learn the scale naturally
+        # Reward scale check: Typical good behavior should get 40-60 per step
+        # Over 300 steps, this gives ~12k-18k return
+        # Success gives ~70-80 per step = ~21k-24k return
+        # Failure gives negative return
         return float(reward)
 
     def _normalise_reward(self, value: float) -> tuple[float, float]:
@@ -516,13 +517,33 @@ class TvcEnv:
         return normalised, std
 
     def _check_termination(self) -> bool:
-        """Check episode termination - RELAXED for better learning."""
+        """Check episode termination with early success bonus."""
         pos = self.data.qpos[0:3]
+        vel = self.data.qvel[0:3]
         quat = self.data.qpos[3:7]
         omega = self.data.qvel[3:6]
         
+        # CRITICAL FIX: Early termination on success
+        # If agent achieves goal, terminate early with success flag
+        # This provides strong learning signal and saves computation
+        target_pos = np.asarray(self._stage_config["target_position"], dtype=np.float64)
+        target_vel = np.asarray(self._stage_config["target_velocity"], dtype=np.float64)
+        target_quat = np.array([1.0, 0.0, 0.0, 0.0])
+        
+        pos_error = np.linalg.norm(pos - target_pos)
+        vel_error = np.linalg.norm(vel - target_vel)
+        orient_alignment = np.abs(np.dot(quat, target_quat))
+        omega_magnitude = np.linalg.norm(omega)
+        
+        # Early success termination - achieves goal state
+        if (pos_error < self._stage_config["position_tolerance"] * 0.8 and  # Within 80% of tolerance
+            vel_error < self._stage_config["velocity_tolerance"] * 0.8 and
+            orient_alignment > 0.98 and  # Within ~11 degrees
+            omega_magnitude < self._stage_config["angular_velocity_tolerance"] * 0.8):
+            # Agent achieved goal! Terminate with success
+            return True
+        
         # Terminate if crashed (below 0.0m) or exceeded max altitude (200m)
-        # Lowered from 0.1m to 0.0m to allow landing attempts
         if pos[2] < 0.0 or pos[2] > 200.0:
             return True
         
@@ -531,17 +552,13 @@ class TvcEnv:
             return True
         
         # Tightened tilt termination for better stability learning
-        # Set to 45° (0.785 rad) - realistic limit for rocket control
-        # Combined with strong reward gradient, this teaches proper upright control
-        # while still allowing moderate tilt angles for maneuvering
         w = quat[0]
         tilt_angle = 2.0 * np.arccos(np.clip(abs(w), 0.0, 1.0))
-        if tilt_angle > 0.785:  # 45 degrees = 0.785 radians (balanced for learning & stability)
+        if tilt_angle > 0.785:  # 45 degrees
             return True
         
-        # RELAXED angular velocity limit to allow more dynamic maneuvers
-        # Changed from 1.5 rad/s to 2.5 rad/s
-        if np.linalg.norm(omega) > 2.5:  # RELAXED - was 1.5
+        # Angular velocity limit
+        if np.linalg.norm(omega) > 2.5:
             return True
         
         if self._step_counter >= self.max_steps:
