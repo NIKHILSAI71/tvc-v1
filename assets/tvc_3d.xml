@@ -23,10 +23,12 @@
   <asset>
     <!-- Enhanced textures for 3D visualization -->
     <texture name="sky" type="skybox" builtin="gradient" rgb1="0.75 0.86 0.97" rgb2="0.94 0.98 1.0" width="1024" height="1024"/>
-    <texture name="ground_grid" type="2d" builtin="checker" rgb1="1 1 1" rgb2="0.2 0.2 0.2" width="2048" height="2048"/>
+    
+    <!-- Realistic grass ground texture - procedural checker pattern with natural grass colors -->
+    <texture name="grass_texture" type="2d" builtin="checker" rgb1="0.2 0.45 0.15" rgb2="0.25 0.5 0.2" width="512" height="512"/>
     
     <!-- Enhanced materials for 3D realism -->
-    <material name="ground_mat" texture="ground_grid" texrepeat="128 128" reflectance="0.05"/>
+    <material name="ground_mat" texture="grass_texture" texrepeat="200 200" reflectance="0.02"/>
     <material name="rocket_white" rgba="0.95 0.95 0.98 1" specular="0.6" shininess="0.8"/>
     <material name="rocket_black" rgba="0.08 0.08 0.1 1" specular="0.4" shininess="0.6"/>
     <material name="engine_metal" rgba="0.4 0.42 0.48 1" specular="0.8" shininess="0.9"/>
@@ -50,18 +52,23 @@
       <!-- Free joint for full 6DOF movement (position + orientation) -->
       <freejoint name="vehicle_free"/>
 
-      <!-- Main rocket body - F9 proportions, scaled mass for 256 kg total -->
-      <geom name="rocket_main" type="cylinder" pos="0 0 0" size="0.25 2.5" material="rocket_white" mass="180.0"/>
+      <!-- REDESIGNED: Smooth single-piece rocket body - F9 proportions, 256 kg total mass
+           Research: "Rocket body should have smooth finish" - NO visible seams or rings -->
+      <geom name="rocket_main" type="cylinder" pos="0 0 0" size="0.25 2.5" material="rocket_white" mass="220.0"/>
 
-      <!-- Structural elements -->
-      <geom name="rocket_upper" type="cylinder" pos="0 0 1.8" size="0.24 0.7" material="rocket_white" mass="25.0"/>
-      <geom name="rocket_band_1" type="cylinder" pos="0 0 1.0" size="0.26 0.08" material="rocket_black" mass="3.0"/>
-      <geom name="rocket_band_2" type="cylinder" pos="0 0 -0.8" size="0.26 0.08" material="rocket_black" mass="3.0"/>
-
-      <!-- Nose cone assembly -->
-      <geom name="nose_cone" type="cylinder" pos="0 0 2.7" size="0.22 0.2" material="rocket_white" mass="8.0"/>
-      <geom name="nose_tip" type="cylinder" pos="0 0 2.95" size="0.12 0.05" material="rocket_white" mass="2.0"/>
-      <geom name="nose_point" type="cylinder" pos="0 0 3.02" size="0.03 0.02" material="rocket_white" mass="0.5"/>
+      <!-- REDESIGNED: Tangent ellipsoid nose - INSERTED into body for perfect blend
+           Mathematical tangent connection: ellipsoid max diameter = cylinder diameter
+           Body cylinder: radius=0.25m, top edge at Z=2.5
+           Ellipsoid: rx=ry=0.25m (matches cylinder), rz=0.8m (nose length)
+           CENTER at Z=2.5 → max width at cylinder top edge → PERFECT tangent blend!
+           Ellipsoid extends: Z=1.7 (hidden inside) to Z=3.3 (visible tip)
+           Visual-only (no collision) to prevent self-collision with body -->
+      <geom name="nose_cone" type="ellipsoid" 
+            pos="0 0 2.5" 
+            size="0.25 0.25 0.8" 
+            material="rocket_white" 
+            mass="10.0"
+            contype="0" conaffinity="0"/>
 
       <!-- Four grid fins for realistic 3D aerodynamics -->
       <geom name="fin_1" type="box" pos="0.35 0 -2.2" size="0.18 0.03 0.25" material="rocket_black" mass="2.5"/>
@@ -78,62 +85,72 @@
       <!-- Center of mass marker -->
       <site name="vehicle_cg" pos="0 0 0" size="0.04" rgba="1 0 0 1"/>
       
-      <!-- 3D TVC System with full gimbal capability -->
-      <body name="tvc_frame" pos="0 0 -2.5">
-        <!-- Engine bay connection -->
-        <geom name="engine_bay" type="cylinder" pos="0 0 0.1" size="0.24 0.1" material="rocket_black" mass="5.0"/>
+      <!-- FULLY REDESIGNED: TVC System COMPLETELY INSIDE rocket body
+           Research findings applied:
+           - "Gimbal is pivot at TOP of combustion chamber" 
+           - "Smooth body surface" - all internal mechanisms hidden
+           - Only engine nozzle bell visible externally -->
+      <body name="tvc_frame" pos="0 0 -2.0">
+        <!-- Engine bay structural mount - DEEP inside rocket body -->
+        <geom name="engine_bay" type="cylinder" pos="0 0 0.4" size="0.22 0.25" material="rocket_black" mass="5.0" contype="0" conaffinity="0"/>
 
-        <!-- TVC housing - robust 3D design -->
-        <geom name="tvc_housing" type="cylinder" pos="0 0 0" size="0.38 0.12" material="gimbal_frame" mass="8.0"/>
+        <!-- TVC gimbal housing - compact, fully internal -->
+        <geom name="tvc_housing" type="cylinder" pos="0 0 0.2" size="0.24 0.1" material="gimbal_frame" mass="6.0" contype="0" conaffinity="0"/>
 
-        <!-- Visible hydraulic actuators (4 around perimeter) -->
-        <geom name="actuator_1" type="box" pos="0.32 0 0" size="0.05 0.04 0.08" material="engine_metal" mass="1.0"/>
-        <geom name="actuator_2" type="box" pos="-0.32 0 0" size="0.05 0.04 0.08" material="engine_metal" mass="1.0"/>
-        <geom name="actuator_3" type="box" pos="0 0.32 0" size="0.04 0.05 0.08" material="engine_metal" mass="1.0"/>
-        <geom name="actuator_4" type="box" pos="0 -0.32 0" size="0.04 0.05 0.08" material="engine_metal" mass="1.0"/>
+        <!-- Hydraulic actuators - concealed inside housing -->
+        <geom name="actuator_1" type="box" pos="0.20 0 0.2" size="0.03 0.025 0.05" material="engine_metal" mass="0.8" contype="0" conaffinity="0"/>
+        <geom name="actuator_2" type="box" pos="-0.20 0 0.2" size="0.03 0.025 0.05" material="engine_metal" mass="0.8" contype="0" conaffinity="0"/>
+        <geom name="actuator_3" type="box" pos="0 0.20 0.2" size="0.025 0.03 0.05" material="engine_metal" mass="0.8" contype="0" conaffinity="0"/>
+        <geom name="actuator_4" type="box" pos="0 -0.20 0.2" size="0.025 0.03 0.05" material="engine_metal" mass="0.8" contype="0" conaffinity="0"/>
 
-          <!-- Gimbal system - X-axis (pitch) - Real F9 limit ±8° (0.14 rad) -->
-        <body name="gimbal_x" pos="0 0 0">
+          <!-- Gimbal X-axis (pitch) - Pivot point at engine mount, fully internal 
+               PIVOT POINT at engine mount interface (inside rocket) -->
+        <body name="gimbal_x" pos="0 0 0.05">
           <joint name="tvc_x" type="hinge" axis="1 0 0" range="-0.14 0.14" limited="true" damping="10" stiffness="0" armature="0.05"/>
-          <geom name="gimbal_ring_x" type="cylinder" pos="0 0 0" size="0.28 0.025" material="gimbal_frame" mass="2.0"/>
+          <!-- Gimbal ring - NON-COLLIDING (would interfere with rocket body walls) -->
+          <geom name="gimbal_ring_x" type="cylinder" pos="0 0 0" size="0.22 0.02" material="gimbal_frame" mass="2.0" contype="0" conaffinity="0"/>
           
-          <!-- X-axis bearings -->
-          <geom name="bearing_x1" type="cylinder" pos="0.28 0 0" size="0.025 0.04" material="engine_metal" mass="0.05"/>
-          <geom name="bearing_x2" type="cylinder" pos="-0.28 0 0" size="0.025 0.04" material="engine_metal" mass="0.05"/>
+          <!-- X-axis bearings (compact, inside housing) - NON-COLLIDING -->
+          <geom name="bearing_x1" type="cylinder" pos="0.22 0 0" size="0.02 0.03" material="engine_metal" mass="0.05" contype="0" conaffinity="0"/>
+          <geom name="bearing_x2" type="cylinder" pos="-0.22 0 0" size="0.02 0.03" material="engine_metal" mass="0.05" contype="0" conaffinity="0"/>
           
           <!-- Y-axis gimbal (yaw) - Real F9 limit ±8° (0.14 rad) -->
           <body name="gimbal_y" pos="0 0 0">
             <joint name="tvc_y" type="hinge" axis="0 1 0" range="-0.14 0.14" limited="true" damping="10" stiffness="0" armature="0.05"/>
-            <geom name="gimbal_ring_y" type="cylinder" pos="0 0 0" size="0.22 0.02" material="gimbal_frame" mass="1.5"/>
+            <!-- Gimbal ring - NON-COLLIDING -->
+            <geom name="gimbal_ring_y" type="cylinder" pos="0 0 0" size="0.18 0.015" material="gimbal_frame" mass="1.5" contype="0" conaffinity="0"/>
             
-            <!-- Y-axis bearings -->
-            <geom name="bearing_y1" type="cylinder" pos="0 0.22 0" size="0.02 0.035" material="engine_metal" mass="0.04"/>
-            <geom name="bearing_y2" type="cylinder" pos="0 -0.22 0" size="0.02 0.035" material="engine_metal" mass="0.04"/>
+            <!-- Y-axis bearings (compact) - NON-COLLIDING -->
+            <geom name="bearing_y1" type="cylinder" pos="0 0.18 0" size="0.015 0.025" material="engine_metal" mass="0.04" contype="0" conaffinity="0"/>
+            <geom name="bearing_y2" type="cylinder" pos="0 -0.18 0" size="0.015 0.025" material="engine_metal" mass="0.04" contype="0" conaffinity="0"/>
             
-            <!-- Hydraulic actuator rods (visible) -->
-            <geom name="rod_1" type="capsule" fromto="0.18 0 0 0.3 0 0" size="0.012" material="engine_metal" mass="0.02"/>
-            <geom name="rod_2" type="capsule" fromto="-0.18 0 0 -0.3 0 0" size="0.012" material="engine_metal" mass="0.02"/>
-            <geom name="rod_3" type="capsule" fromto="0 0.18 0 0 0.3 0" size="0.012" material="engine_metal" mass="0.02"/>
-            <geom name="rod_4" type="capsule" fromto="0 -0.18 0 0 -0.3 0" size="0.012" material="engine_metal" mass="0.02"/>
+            <!-- Hydraulic actuator rods connecting to engine (shorter, inside housing) - NON-COLLIDING -->
+            <geom name="rod_1" type="capsule" fromto="0.14 0 0 0.22 0 0" size="0.01" material="engine_metal" mass="0.02" contype="0" conaffinity="0"/>
+            <geom name="rod_2" type="capsule" fromto="-0.14 0 0 -0.22 0 0" size="0.01" material="engine_metal" mass="0.02" contype="0" conaffinity="0"/>
+            <geom name="rod_3" type="capsule" fromto="0 0.14 0 0 0.22 0" size="0.01" material="engine_metal" mass="0.02" contype="0" conaffinity="0"/>
+            <geom name="rod_4" type="capsule" fromto="0 -0.14 0 0 -0.22 0" size="0.01" material="engine_metal" mass="0.02" contype="0" conaffinity="0"/>
 
-            <!-- Merlin-inspired engine assembly - scaled mass -->
-            <body name="engine" pos="0 0 -0.15">
-              <!-- Turbopump assembly -->
-              <geom name="turbopump" type="cylinder" pos="0 0 -0.05" size="0.06 0.08" material="engine_metal" mass="2.0"/>
+            <!-- REDESIGNED: Merlin-inspired engine - PROFESSIONAL APPEARANCE
+                 Gimbal pivot inside rocket, only nozzle bell visible externally
+                 Positioning ensures ALL internal components hidden -->
+            <body name="engine" pos="0 0 -0.4">
+              <!-- Turbopump assembly - FULLY INSIDE rocket body (non-colliding) -->
+              <geom name="turbopump" type="cylinder" pos="0 0 0" size="0.06 0.08" material="engine_metal" mass="2.0" contype="0" conaffinity="0"/>
 
-              <!-- Combustion chamber -->
-              <geom name="chamber" type="cylinder" pos="0 0 -0.2" size="0.1 0.15" material="engine_metal" mass="8.0"/>
+              <!-- Combustion chamber - FULLY INSIDE rocket body (non-colliding) -->
+              <geom name="chamber" type="cylinder" pos="0 0 -0.15" size="0.10 0.12" material="engine_metal" mass="7.0" contype="0" conaffinity="0"/>
 
-              <!-- Nozzle throat -->
-              <geom name="throat" type="cylinder" pos="0 0 -0.4" size="0.06 0.05" material="engine_metal" mass="3.0"/>
+              <!-- Nozzle throat - AT rocket body bottom edge (transition point) -->
+              <geom name="throat" type="cylinder" pos="0 0 -0.25" size="0.06 0.03" material="engine_metal" mass="2.5" contype="0" conaffinity="0"/>
 
-              <!-- Nozzle expansion -->
-              <geom name="nozzle_1" type="cylinder" pos="0 0 -0.5" size="0.08 0.05" material="engine_metal" mass="2.0"/>
-              <geom name="nozzle_2" type="cylinder" pos="0 0 -0.6" size="0.12 0.05" material="engine_metal" mass="1.5"/>
-              <geom name="nozzle_3" type="cylinder" pos="0 0 -0.7" size="0.16 0.05" material="engine_metal" mass="1.0"/>
+              <!-- ONLY VISIBLE COMPONENT: Nozzle bell extending below rocket
+                   Classic bell nozzle expansion with smooth taper -->
+              <geom name="nozzle_1" type="cylinder" pos="0 0 -0.35" size="0.09 0.06" material="engine_metal" mass="2.0"/>
+              <geom name="nozzle_2" type="cylinder" pos="0 0 -0.45" size="0.13 0.06" material="engine_metal" mass="1.5"/>
+              <geom name="nozzle_3" type="cylinder" pos="0 0 -0.55" size="0.17 0.05" material="engine_metal" mass="1.0"/>
 
-              <!-- Nozzle exit -->
-              <geom name="nozzle_exit" type="cylinder" pos="0 0 -0.78" size="0.18 0.03" material="engine_metal" mass="0.5"/>
+              <!-- Nozzle exit - wide bell opening (classic Merlin appearance) -->
+              <geom name="nozzle_exit" type="cylinder" pos="0 0 -0.62" size="0.19 0.02" material="engine_metal" mass="0.5"/>
               
               <!-- Multi-layer thrust plume for dynamic visualization (fade via rgba alpha) -->
               <!-- FIXED: Initial alpha values set to visible (will be dynamically updated based on thrust) -->
@@ -158,6 +175,8 @@
     </body>
 
     <!-- Enhanced camera setup for 3D training visualization -->
+    <!-- Default camera - custom user-defined position -->
+    <camera name="default_view" mode="fixed" pos="-98.627 -4.881 60.118" xyaxes="0.049 -0.999 0.000 0.519 0.026 0.854" fovy="45"/>
     <camera name="follow" mode="trackcom" target="vehicle" pos="0 -12 6" fovy="50"/>
     <camera name="chase" mode="track" target="vehicle" pos="0 -8 4" fovy="45"/>
     <camera name="tvc_detail" mode="track" target="tvc_frame" pos="2 -3 -2" fovy="25"/>
@@ -212,7 +231,7 @@
 
   <!-- Visual enhancements -->
   <visual>
-    <global offwidth="1920" offheight="1080"/>
+    <global offwidth="1920" offheight="1080" cameraid="0"/>
     <quality shadowsize="2048" offsamples="8"/>
     <map znear="0.1" zfar="100"/>
   </visual>
