@@ -42,23 +42,23 @@ def build_curriculum() -> List[CurriculumStage]:
     # Starting at 8m makes initial stabilization much more achievable
     hover_stage = CurriculumStage(
         name="hover_stabilization",
-        episodes=300,  # Increased from 200 for better learning
-        target_position=(0.0, 0.0, 8.0),  # 8m instead of 50m
+        episodes=300,  # Sufficient episodes for learning
+        target_position=(0.0, 0.0, 8.0),  # 8m hover height
         target_orientation=(1.0, 0.0, 0.0, 0.0),  # upright
         target_velocity=(0.0, 0.0, 0.0),
         target_angular_velocity=(0.0, 0.0, 0.0),
-        initial_position=(0.0, 0.0, 8.0),  # 8m instead of 50m
+        initial_position=(0.0, 0.0, 8.0),  # Start at target
         initial_velocity=(0.0, 0.0, 0.0),
         initial_orientation=(1.0, 0.0, 0.0, 0.0),
         initial_angular_velocity=(0.0, 0.0, 0.0),
-        position_tolerance=1.0,  # Tightened from 2.0m - more precise at lower altitude
-        velocity_tolerance=0.8,  # Tightened from 1.0 for better stability
-        orientation_tolerance=0.15,  # Stricter orientation requirement
-        angular_velocity_tolerance=0.3,  # CRITICAL: Must not be spinning (was 0.5)
+        position_tolerance=1.5,  # RELAXED: 1.5m for initial learning (was 1.0)
+        velocity_tolerance=1.0,  # RELAXED: 1.0 m/s (was 0.8)
+        orientation_tolerance=0.20,  # RELAXED: 0.20 rad ≈ 11.5° (was 0.15)
+        angular_velocity_tolerance=0.4,  # RELAXED: 0.4 rad/s (was 0.3)
         tolerance_bonus=0.5,
         reward_threshold=0.15,
-        success_episodes=5,  # Need more consistent success
-        min_episodes=100,  # Increased minimum
+        success_episodes=3,  # CRITICAL: Reduced to 3 consistent successes (was 5)
+        min_episodes=50,  # Reduced minimum to allow faster progression
     )
 
     # Stage 2: Lateral translation with offset (5m lateral at 8m altitude)
