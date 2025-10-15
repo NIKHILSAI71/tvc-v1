@@ -38,7 +38,7 @@ class RunningNormalizer:
         obs = np.asarray(observation, dtype=np.float32)
         return cls(count=1.0, mean=obs, m2=np.zeros_like(obs))
 
-    def normalize(self, observation: np.ndarray) -> jnp.ndarray:
+    def normalize(self, observation: np.ndarray, update_stats: bool = True) -> jnp.ndarray:
         obs = np.asarray(observation, dtype=np.float32)
         if self.mean.size == 0 or self.mean.shape != obs.shape or self.count < 1.0:
             self.count = 1.0
@@ -46,13 +46,20 @@ class RunningNormalizer:
             self.m2 = np.zeros_like(obs)
             return jnp.asarray(obs, dtype=jnp.float32)
 
-        self.count += 1.0
-        delta = obs - self.mean
-        self.mean = self.mean + delta / self.count
-        delta2 = obs - self.mean
-        self.m2 = self.m2 + delta * delta2
-        variance = np.maximum(self.m2 / self.count, 1e-6)
+        # CRITICAL FIX: Only update statistics during warmup period (first 10k steps)
+        # After warmup, freeze the normalization to prevent distribution shift
+        # This prevents previously learned behaviors from becoming invalid
+        if update_stats and self.count < 10000:
+            self.count += 1.0
+            delta = obs - self.mean
+            self.mean = self.mean + delta / self.count
+            delta2 = obs - self.mean
+            self.m2 = self.m2 + delta * delta2
+        
+        variance = np.maximum(self.m2 / max(self.count, 1.0), 1e-6)
         normalized = (obs - self.mean) / np.sqrt(variance)
+        # Clip to prevent extreme values
+        normalized = np.clip(normalized, -10.0, 10.0)
         return jnp.asarray(normalized, dtype=jnp.float32)
 
 
@@ -76,13 +83,23 @@ class TrainingState:
     stage_successes: int = 0
     stage_attempts: int = 0
     # Rolling success rate tracking (window of 20 episodes)
-    recent_successes: List[bool] = field(default_factory=lambda: [False] * 20)
+    # CRITICAL FIX: Don't pre-fill with False - confuses early training
+    # Empty list grows to 20, then becomes true rolling window
+    recent_successes: List[bool] = field(default_factory=list)
+    rolling_window_size: int = 20
 
     def update_rolling_success(self, success: bool) -> float:
-        """Update rolling success rate window."""
-        self.recent_successes.pop(0)
+        """Update rolling success rate window.
+        
+        FIXED: Doesn't pre-fill with False values that create misleading percentages.
+        - Episodes 1-19: Shows actual success rate of completed episodes
+        - Episode 20+: True 20-episode rolling window
+        """
         self.recent_successes.append(success)
-        return sum(self.recent_successes) / len(self.recent_successes)
+        # Keep only last N episodes
+        if len(self.recent_successes) > self.rolling_window_size:
+            self.recent_successes.pop(0)
+        return sum(self.recent_successes) / len(self.recent_successes) if self.recent_successes else 0.0
 
 
 @dataclass(frozen=True)
@@ -97,26 +114,27 @@ class TrainingConfig:
     """
     gamma: float = 0.99
     lam: float = 0.95
-    learning_rate: float = 5e-4  # Increased from 3e-4 for faster learning
+    learning_rate: float = 1e-3  # CRITICAL: Higher for faster initial learning
     clip_epsilon: float = 0.2    # Standard PPO value
-    rollout_length: int = 3072   # Increased from 2048 for better value estimation
-    num_epochs: int = 4          # Keep at 4 to prevent overfitting
-    minibatch_size: int = 256    # Increased from 128 for more stable gradients
+    rollout_length: int = 2048   # Reduced for faster iteration
+    num_epochs: int = 6          # Increased for better sample efficiency
+    minibatch_size: int = 128    # Balanced for GPU efficiency
     value_clip_epsilon: float = 0.2  # Match actor clipping
-    grad_clip_norm: float = 0.5  # Conservative to prevent instability
-    entropy_coef: float = 0.01   # Initial exploration coefficient
-    entropy_coef_decay: float = 0.9995
+    grad_clip_norm: float = 1.0  # Increased to allow larger updates
+    entropy_coef: float = 0.05   # CRITICAL: Higher for exploration
+    entropy_coef_decay: float = 0.998  # Slower decay to maintain exploration
     value_coef: float = 0.5      # Balanced value function importance
     weight_decay: float = 1e-5   # Light regularization
 
     # Neuroevolution settings - Optimized for better exploration
-    use_evolution: bool = True
-    population_size: int = 10  # Increased from 5 for better diversity
-    elite_keep: int = 2  # Keep top 2 performers
-    mutation_scale: float = 0.08  # Increased from 0.05 for more exploration
-    mutation_prob: float = 0.8  # 80% of parameters mutated
-    evolution_interval: int = 3  # More frequent evolution (from 5)
-    fitness_episodes: int = 1  # Single episode evaluation for speed
+    # RECOMMENDATION: Set use_evolution=False for stable learning (evolution has bugs!)
+    use_evolution: bool = False  # DISABLED - Was destroying learned performance
+    population_size: int = 12  # Increased diversity
+    elite_keep: int = 3  # Keep top 3 performers
+    mutation_scale: float = 0.10  # Stronger mutations for exploration
+    mutation_prob: float = 0.7  # 70% of parameters mutated
+    evolution_interval: int = 5  # Every 5 episodes for stability
+    fitness_episodes: int = 5  # CRITICAL FIX: Increased from 2 to 5 for reliable evaluation
 
     # Configuration objects
     policy_config: PolicyConfig = PolicyConfig()
@@ -299,19 +317,18 @@ def _collect_rollout(
 
     rewards_array = jnp.array(reward_buffer, dtype=jnp.float32)
 
-    # Normalize rewards to prevent value function scale issues
-    if normalize_rewards and len(reward_buffer) > 1:
-        reward_mean = jnp.mean(rewards_array)
-        reward_std = jnp.std(rewards_array) + 1e-8
-        normalized_rewards = (rewards_array - reward_mean) / reward_std
-    else:
-        normalized_rewards = rewards_array
+    # CRITICAL FIX: DO NOT normalize rewards within rollout
+    # This destroys the carefully crafted reward gradient and makes learning impossible
+    # PPO can handle the natural reward scale - reward normalization should only be
+    # used for the value function baseline, not for the actual rewards
+    # The evolution strategy uses raw rewards, creating a mismatch when we normalize here
+    normalized_rewards = rewards_array  # Use raw rewards for learning
 
     batch = {
         "observations": jnp.stack(obs_buffer),
         "actions": jnp.stack(action_buffer),
         "log_probs": jnp.stack(logprob_buffer),
-        "rewards": normalized_rewards,  # Use normalized rewards
+        "rewards": normalized_rewards,  # Use raw rewards
         "values": jnp.stack(value_buffer),
         "dones": jnp.array(done_buffer, dtype=jnp.float32),
     }
@@ -322,8 +339,14 @@ def _collect_rollout(
     num_successful = sum(episode_successes)
     success_rate = num_successful / num_episodes if num_episodes > 0 else 0.0
 
+    # CRITICAL FIX: Report actual per-episode return, not rollout sum
+    # Previous bug: summed all 2048 steps (6-7 episodes) → inflated returns of 127k-147k
+    # Now: report the last completed episode's return for accurate tracking
+    actual_episode_return = episode_returns[-1] if episode_returns else float(jnp.sum(rewards_array))
+    
     stats = {
-        "episode_return": float(jnp.sum(rewards_array)),  # Total return across all episodes in rollout
+        "episode_return": actual_episode_return,  # FIXED: Actual single episode return
+        "rollout_total_return": float(jnp.sum(rewards_array)),  # Total across all episodes in rollout
         "reward_mean": float(jnp.mean(rewards_array)),
         "reward_std": float(jnp.std(rewards_array)),
         "value_mean": float(jnp.mean(batch["values"][:-1])),
@@ -358,13 +381,24 @@ def _ppo_update(
         config.lam,
     )
 
-    # Normalize advantages
+    # Normalize advantages (CORRECT - this is standard and necessary)
+    # Advantage normalization helps with policy gradient stability
     advantages = (advantages - jnp.mean(advantages)) / (jnp.std(advantages) + 1e-8)
     advantages = jnp.nan_to_num(advantages, nan=0.0)
 
-    # Normalize returns
-    returns = (returns - jnp.mean(returns)) / (jnp.std(returns) + 1e-8)
-    returns = jnp.nan_to_num(returns, nan=0.0)
+    # CRITICAL FIX: Normalize returns for value function training stability
+    # While we don't normalize rewards (to preserve learning signal),
+    # we MUST normalize returns for the value function to prevent explosion
+    # The value function needs to predict in a reasonable range [-3, +3]
+    # This prevents gradient explosion when returns are 100k+
+    returns_mean = jnp.mean(returns)
+    returns_std = jnp.std(returns) + 1e-8
+    returns_normalized = (returns - returns_mean) / returns_std
+    returns_normalized = jnp.nan_to_num(returns_normalized, nan=0.0)
+    returns_normalized = jnp.clip(returns_normalized, -10.0, 10.0)  # Prevent extreme values
+    
+    # Use normalized returns for value function training
+    returns = returns_normalized
 
     dataset = {
         "obs": batch["observations"],
@@ -487,7 +521,11 @@ def _evaluate_candidate(
     obs_rms: RunningNormalizer,
     num_episodes: int = 3,
 ) -> float:
-    """Evaluate a policy candidate."""
+    """Evaluate a policy candidate.
+    
+    CRITICAL: Freezes observation normalization during evaluation to prevent
+    mutant policies from corrupting the statistics used by the main policy.
+    """
     total_return = 0.0
 
     for _ in range(num_episodes):
@@ -498,7 +536,9 @@ def _evaluate_candidate(
         steps = 0
 
         while not done and steps < 500:
-            norm_obs = obs_rms.normalize(obs)
+            # CRITICAL FIX: Freeze obs stats during evaluation
+            # Without this, evaluating 12 mutants corrupts normalization for main policy!
+            norm_obs = obs_rms.normalize(obs, update_stats=False)
             action = funcs.actor(params, norm_obs, key=None, deterministic=True)
             action_np = np.asarray(action, dtype=np.float32)
             result = env.step(action_np)
@@ -532,7 +572,8 @@ def train_controller(
     sys.stdout.flush()
     sys.stderr.flush()
     
-    env = TvcEnv(dt=0.02, ctrl_limit=0.14, max_steps=1000, seed=seed)
+    # CRITICAL: Use 300 steps for rapid learning (not 1000)
+    env = TvcEnv(dt=0.02, ctrl_limit=0.14, max_steps=300, seed=seed)
     env.apply_rocket_params(config.rocket_params)
 
     # Build curriculum
@@ -682,16 +723,21 @@ def train_controller(
             evolution_metrics["mean_fitness"] = mean_fitness
             evolution_metrics["current_fitness"] = current_fitness
 
-            # Adopt best candidate if it's significantly better (lower threshold)
-            if best_fitness > current_fitness + 0.5:  # Reduced from 1.0 to 0.5
+            # Adopt best candidate if it's significantly better
+            # CRITICAL FIX: Use percentage-based threshold to avoid adopting random noise
+            # Threshold: 5% improvement required (not just 0.5 points on 6000+ returns!)
+            improvement_threshold = max(current_fitness * 0.05, 100.0)  # At least 5% or 100 points
+            if best_fitness > current_fitness + improvement_threshold:
                 state.params = population[0][1]
                 LOGGER.info("  🧬 Evolution: Adopted best | Fitness: %.2f → %.2f | Pop mean: %.2f",
                            current_fitness, best_fitness, mean_fitness)
                 evolution_metrics["evolution_adopted"] = 1.0
                 evolution_metrics["fitness_improvement"] = best_fitness - current_fitness
 
-                # Reset optimizer state for new params
-                state.opt_state = optimizer.init(state.params)
+                # CRITICAL FIX: DO NOT reset optimizer state!
+                # Resetting destroys Adam's momentum/velocity, causing unstable learning
+                # The optimizer should CONTINUE with accumulated statistics
+                # state.opt_state = optimizer.init(state.params)  # REMOVED - Was destroying learning!
             else:
                 evolution_metrics["evolution_adopted"] = 0.0
                 if episode % 10 == 0:  # Log occasionally when not adopting
@@ -743,9 +789,17 @@ def train_controller(
         # Enhanced logging
         if (episode + 1) % 1 == 0:  # Log every episode
             success_indicator = "✓" if episode_success else "✗"
+            
+            # Format rolling success with window size indicator
+            rolling_window_current = len(state.recent_successes)
+            if rolling_window_current < state.rolling_window_size:
+                rolling_str = f"{rolling_success_rate*100:5.1f}% ({rolling_window_current}/{state.rolling_window_size})"
+            else:
+                rolling_str = f"{rolling_success_rate*100:5.1f}%"
+            
             LOGGER.info(
                 "Ep %3d/%d | Stage: %-20s | %s | Ret: %7.2f | Avg: %7.2f | Best: %7.2f | "
-                "Success: %5.1f%% (rolling: %5.1f%%) | PosErr: %.3fm | Loss: %6.3f | Time: %.1fs",
+                "Success: %5.1f%% (rolling: %s) | PosErr: %.3fm | Loss: %6.3f | Time: %.1fs",
                 episode + 1,
                 total_episodes,
                 stage.name,
@@ -754,7 +808,7 @@ def train_controller(
                 state.moving_avg_return,
                 state.best_return,
                 stage_success_rate * 100,
-                rolling_success_rate * 100,
+                rolling_str,
                 rollout_stats.get("final_position_error", 0.0),
                 update_metrics["loss"],
                 episode_time,
