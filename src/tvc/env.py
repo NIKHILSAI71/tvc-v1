@@ -54,7 +54,7 @@ class TvcEnv:
         # Domain randomization parameters (stored for reset)
         # Domain randomization parameters (stored for reset)
         self._base_mass = 282.5  # Fixed: Matches XML total mass
-        self._base_inertia = np.array([680.0, 680.0, 45.0])
+        self._base_inertia = np.array([95.0, 95.0, 5.0])
         self._base_thrust_max = 8540.0
         self._base_damping = 0.8
         
@@ -235,8 +235,8 @@ class TvcEnv:
         # STRENGTHENED: For hover stabilization, add significant offset to force correction
         # This prevents "Null-Op Success" where agent just spawns at target and wins
         if getattr(self, "_stage_config", {}).get("stage_name") == "hover_stabilization":
-             # ±0.5m - 0.8m initial error
-             pos_noise = self._rng.uniform(-0.8, 0.8, 3) 
+             # ±0.4m initial error (Reduced from 0.8 to prevent instability)
+             pos_noise = self._rng.uniform(-0.4, 0.4, 3) 
              # Ensure Z doesn't go below safety margins (start at 8m, so -0.8 is fine)
         else:
              pos_noise = self._rng.normal(0.0, 0.05 * noise_scale, 3)  # Standard GPS noise

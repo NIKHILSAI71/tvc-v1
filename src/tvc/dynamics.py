@@ -31,10 +31,10 @@ class RocketParams:
         tvc_limit: Maximum TVC gimbal angle (radians) - real F9 limit ~±8°.
     """
     mass: float = 280.0  # Matches MuJoCo XML total mass (~280kg)
-    inertia: Tuple[float, float, float] = (600.0, 600.0, 10.0)  # Matches 5m tall, 0.5m wide cylinder
+    inertia: Tuple[float, float, float] = (95.0, 95.0, 5.0)  # Matches 2m tall, 0.3m wide rocket (Scale 1:100)
     thrust_max: float = 8540.0  # 1:100 scale of Merlin 1D
     thrust_min: float = 3416.0  # 40% throttle
-    arm: float = 3.5  # Matches XML thrust site location relative to CoM (~-3.9m)
+    arm: float = 1.15  # Matches XML thrust site location relative to CoM (~-1.15m)
     damping: Tuple[float, float, float] = (0.4, 0.2, 0.8)
     gravity: float = 9.81
     tvc_limit: float = 0.14  # ±8 degrees gimbal

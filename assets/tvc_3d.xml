@@ -48,163 +48,95 @@
     </body>
 
     <!-- Realistic 3D rocket with full 6DOF movement - 256 kg total mass -->
-    <body name="vehicle" pos="0 0 50">
+    <!-- RESCALED: 2.0m height, 0.3m diameter (Large Drone Scale) -->
+    <body name="vehicle" pos="0 0 8">
       <!-- Free joint for full 6DOF movement (position + orientation) -->
       <freejoint name="vehicle_free"/>
 
-      <!-- REDESIGNED: Smooth single-piece rocket body - F9 proportions, 256 kg total mass
-           Research: "Rocket body should have smooth finish" - NO visible seams or rings -->
-      <geom name="rocket_main" type="cylinder" pos="0 0 0" size="0.25 2.5" material="rocket_white" mass="220.0"/>
+      <!-- Main Body: Height 2.0m (half-size 1.0), Radius 0.15m -->
+      <geom name="rocket_main" type="cylinder" pos="0 0 0" size="0.15 1.0" material="rocket_white" mass="220.0"/>
 
-      <!-- REDESIGNED: Tangent ellipsoid nose - INSERTED into body for perfect blend
-           Mathematical tangent connection: ellipsoid max diameter = cylinder diameter
-           Body cylinder: radius=0.25m, top edge at Z=2.5
-           Ellipsoid: rx=ry=0.25m (matches cylinder), rz=0.8m (nose length)
-           CENTER at Z=2.5 → max width at cylinder top edge → PERFECT tangent blend!
-           Ellipsoid extends: Z=1.7 (hidden inside) to Z=3.3 (visible tip)
-           Visual-only (no collision) to prevent self-collision with body -->
+      <!-- Nose Cone: Tangent ellipsoid blending at Z=1.0 -->
       <geom name="nose_cone" type="ellipsoid" 
-            pos="0 0 2.5" 
-            size="0.25 0.25 0.8" 
+            pos="0 0 1.0" 
+            size="0.15 0.15 0.4" 
             material="rocket_white" 
             mass="10.0"
             contype="0" conaffinity="0"/>
 
-      <!-- Four grid fins for realistic 3D aerodynamics -->
-      <geom name="fin_1" type="box" pos="0.35 0 -2.2" size="0.18 0.03 0.25" material="rocket_black" mass="2.5"/>
-      <geom name="fin_2" type="box" pos="-0.35 0 -2.2" size="0.18 0.03 0.25" material="rocket_black" mass="2.5"/>
-      <geom name="fin_3" type="box" pos="0 0.35 -2.2" size="0.03 0.18 0.25" material="rocket_black" mass="2.5"/>
-      <geom name="fin_4" type="box" pos="0 -0.35 -2.2" size="0.03 0.18 0.25" material="rocket_black" mass="2.5"/>
+      <!-- Grid Fins: Scaled down -->
+      <geom name="fin_1" type="box" pos="0.20 0 -0.8" size="0.08 0.015 0.12" material="rocket_black" mass="2.5"/>
+      <geom name="fin_2" type="box" pos="-0.20 0 -0.8" size="0.08 0.015 0.12" material="rocket_black" mass="2.5"/>
+      <geom name="fin_3" type="box" pos="0 0.20 -0.8" size="0.015 0.08 0.12" material="rocket_black" mass="2.5"/>
+      <geom name="fin_4" type="box" pos="0 -0.20 -0.8" size="0.015 0.08 0.12" material="rocket_black" mass="2.5"/>
 
-      <!-- Landing legs (folded position) -->
-      <geom name="leg_1" type="capsule" fromto="0.2 0.2 -2.0 0.4 0.4 -2.8" size="0.02" material="rocket_black" mass="2.0"/>
-      <geom name="leg_2" type="capsule" fromto="-0.2 0.2 -2.0 -0.4 0.4 -2.8" size="0.02" material="rocket_black" mass="2.0"/>
-      <geom name="leg_3" type="capsule" fromto="-0.2 -0.2 -2.0 -0.4 -0.4 -2.8" size="0.02" material="rocket_black" mass="2.0"/>
-      <geom name="leg_4" type="capsule" fromto="0.2 -0.2 -2.0 0.4 -0.4 -2.8" size="0.02" material="rocket_black" mass="2.0"/>
+      <!-- Landing Legs: Scaled down -->
+      <geom name="leg_1" type="capsule" fromto="0.12 0.12 -0.8 0.25 0.25 -1.2" size="0.015" material="rocket_black" mass="2.0"/>
+      <geom name="leg_2" type="capsule" fromto="-0.12 0.12 -0.8 -0.25 0.25 -1.2" size="0.015" material="rocket_black" mass="2.0"/>
+      <geom name="leg_3" type="capsule" fromto="-0.12 -0.12 -0.8 -0.25 -0.25 -1.2" size="0.015" material="rocket_black" mass="2.0"/>
+      <geom name="leg_4" type="capsule" fromto="0.12 -0.12 -0.8 0.25 -0.25 -1.2" size="0.015" material="rocket_black" mass="2.0"/>
       
       <!-- Center of mass marker -->
-      <site name="vehicle_cg" pos="0 0 0" size="0.04" rgba="1 0 0 1"/>
+      <site name="vehicle_cg" pos="0 0 0" size="0.03" rgba="1 0 0 1"/>
       
-      <!-- FULLY REDESIGNED: TVC System COMPLETELY INSIDE rocket body
-           Research findings applied:
-           - "Gimbal is pivot at TOP of combustion chamber" 
-           - "Smooth body surface" - all internal mechanisms hidden
-           - Only engine nozzle bell visible externally -->
-      <body name="tvc_frame" pos="0 0 -2.0">
-        <!-- Engine bay structural mount - DEEP inside rocket body -->
-        <geom name="engine_bay" type="cylinder" pos="0 0 0.4" size="0.22 0.25" material="rocket_black" mass="5.0" contype="0" conaffinity="0"/>
+      <!-- TVC System: Condensed and moved up -->
+      <body name="tvc_frame" pos="0 0 -0.8">
+        <!-- Engine bay -->
+        <geom name="engine_bay" type="cylinder" pos="0 0 0.15" size="0.13 0.1" material="rocket_black" mass="5.0" contype="0" conaffinity="0"/>
 
-        <!-- TVC gimbal housing - compact, fully internal -->
-        <geom name="tvc_housing" type="cylinder" pos="0 0 0.2" size="0.24 0.1" material="gimbal_frame" mass="6.0" contype="0" conaffinity="0"/>
+        <!-- TVC housing -->
+        <geom name="tvc_housing" type="cylinder" pos="0 0 0.08" size="0.14 0.04" material="gimbal_frame" mass="6.0" contype="0" conaffinity="0"/>
 
-        <!-- Hydraulic actuators - concealed inside housing -->
-        <geom name="actuator_1" type="box" pos="0.20 0 0.2" size="0.03 0.025 0.05" material="engine_metal" mass="0.8" contype="0" conaffinity="0"/>
-        <geom name="actuator_2" type="box" pos="-0.20 0 0.2" size="0.03 0.025 0.05" material="engine_metal" mass="0.8" contype="0" conaffinity="0"/>
-        <geom name="actuator_3" type="box" pos="0 0.20 0.2" size="0.025 0.03 0.05" material="engine_metal" mass="0.8" contype="0" conaffinity="0"/>
-        <geom name="actuator_4" type="box" pos="0 -0.20 0.2" size="0.025 0.03 0.05" material="engine_metal" mass="0.8" contype="0" conaffinity="0"/>
-
-          <!-- Gimbal X-axis (pitch) - Pivot point at engine mount, fully internal 
-               PIVOT POINT at engine mount interface (inside rocket) -->
-        <body name="gimbal_x" pos="0 0 0.05">
-          <joint name="tvc_x" type="hinge" axis="1 0 0" range="-0.14 0.14" limited="true" damping="0.5" stiffness="0" armature="0.05"/>
-          <!-- Gimbal ring - NON-COLLIDING (would interfere with rocket body walls) -->
-          <geom name="gimbal_ring_x" type="cylinder" pos="0 0 0" size="0.22 0.02" material="gimbal_frame" mass="2.0" contype="0" conaffinity="0"/>
+        <!-- Actuators -->
+        <geom name="actuator_1" type="box" pos="0.12 0 0.08" size="0.02 0.015 0.03" material="engine_metal" mass="0.8" contype="0" conaffinity="0"/>
+        <geom name="actuator_2" type="box" pos="-0.12 0 0.08" size="0.02 0.015 0.03" material="engine_metal" mass="0.8" contype="0" conaffinity="0"/>
+        
+        <!-- Gimbal X (Pitch) -->
+        <body name="gimbal_x" pos="0 0 0.02">
+          <joint name="tvc_x" type="hinge" axis="1 0 0" range="-0.14 0.14" limited="true" damping="0.5" stiffness="0" armature="0.02"/>
+          <geom name="gimbal_ring_x" type="cylinder" pos="0 0 0" size="0.12 0.01" material="gimbal_frame" mass="2.0" contype="0" conaffinity="0"/>
           
-          <!-- X-axis bearings (compact, inside housing) - NON-COLLIDING -->
-          <geom name="bearing_x1" type="cylinder" pos="0.22 0 0" size="0.02 0.03" material="engine_metal" mass="0.05" contype="0" conaffinity="0"/>
-          <geom name="bearing_x2" type="cylinder" pos="-0.22 0 0" size="0.02 0.03" material="engine_metal" mass="0.05" contype="0" conaffinity="0"/>
-          
-          <!-- Y-axis gimbal (yaw) - Real F9 limit ±8° (0.14 rad) -->
+          <!-- Gimbal Y (Yaw) -->
           <body name="gimbal_y" pos="0 0 0">
-            <joint name="tvc_y" type="hinge" axis="0 1 0" range="-0.14 0.14" limited="true" damping="0.5" stiffness="0" armature="0.05"/>
-            <!-- Gimbal ring - NON-COLLIDING -->
-            <geom name="gimbal_ring_y" type="cylinder" pos="0 0 0" size="0.18 0.015" material="gimbal_frame" mass="1.5" contype="0" conaffinity="0"/>
+            <joint name="tvc_y" type="hinge" axis="0 1 0" range="-0.14 0.14" limited="true" damping="0.5" stiffness="0" armature="0.02"/>
+            <geom name="gimbal_ring_y" type="cylinder" pos="0 0 0" size="0.10 0.01" material="gimbal_frame" mass="1.5" contype="0" conaffinity="0"/>
             
-            <!-- Y-axis bearings (compact) - NON-COLLIDING -->
-            <geom name="bearing_y1" type="cylinder" pos="0 0.18 0" size="0.015 0.025" material="engine_metal" mass="0.04" contype="0" conaffinity="0"/>
-            <geom name="bearing_y2" type="cylinder" pos="0 -0.18 0" size="0.015 0.025" material="engine_metal" mass="0.04" contype="0" conaffinity="0"/>
-            
-            <!-- Hydraulic actuator rods connecting to engine (shorter, inside housing) - NON-COLLIDING -->
-            <geom name="rod_1" type="capsule" fromto="0.14 0 0 0.22 0 0" size="0.01" material="engine_metal" mass="0.02" contype="0" conaffinity="0"/>
-            <geom name="rod_2" type="capsule" fromto="-0.14 0 0 -0.22 0 0" size="0.01" material="engine_metal" mass="0.02" contype="0" conaffinity="0"/>
-            <geom name="rod_3" type="capsule" fromto="0 0.14 0 0 0.22 0" size="0.01" material="engine_metal" mass="0.02" contype="0" conaffinity="0"/>
-            <geom name="rod_4" type="capsule" fromto="0 -0.14 0 0 -0.22 0" size="0.01" material="engine_metal" mass="0.02" contype="0" conaffinity="0"/>
-
-            <!-- REDESIGNED: Merlin-inspired engine - PROFESSIONAL APPEARANCE
-                 Gimbal pivot inside rocket, only nozzle bell visible externally
-                 Positioning ensures ALL internal components hidden -->
-            <body name="engine" pos="0 0 -0.4">
-              <!-- Turbopump assembly - FULLY INSIDE rocket body (non-colliding) -->
-              <geom name="turbopump" type="cylinder" pos="0 0 0" size="0.06 0.08" material="engine_metal" mass="2.0" contype="0" conaffinity="0"/>
-
-              <!-- Combustion chamber - FULLY INSIDE rocket body (non-colliding) -->
-              <geom name="chamber" type="cylinder" pos="0 0 -0.15" size="0.10 0.12" material="engine_metal" mass="7.0" contype="0" conaffinity="0"/>
-
-              <!-- Nozzle throat - AT rocket body bottom edge (transition point) -->
-              <geom name="throat" type="cylinder" pos="0 0 -0.25" size="0.06 0.03" material="engine_metal" mass="2.5" contype="0" conaffinity="0"/>
-
-              <!-- ONLY VISIBLE COMPONENT: Nozzle bell extending below rocket
-                   Classic bell nozzle expansion with smooth taper -->
-              <geom name="nozzle_1" type="cylinder" pos="0 0 -0.35" size="0.09 0.06" material="engine_metal" mass="2.0"/>
-              <geom name="nozzle_2" type="cylinder" pos="0 0 -0.45" size="0.13 0.06" material="engine_metal" mass="1.5"/>
-              <geom name="nozzle_3" type="cylinder" pos="0 0 -0.55" size="0.17 0.05" material="engine_metal" mass="1.0"/>
-
-              <!-- Nozzle exit - wide bell opening (classic Merlin appearance) -->
-              <geom name="nozzle_exit" type="cylinder" pos="0 0 -0.62" size="0.19 0.02" material="engine_metal" mass="0.5"/>
+            <!-- Engine: Scaled down Merlin -->
+            <body name="engine" pos="0 0 -0.15">
+              <geom name="turbopump" type="cylinder" pos="0 0 0" size="0.04 0.04" material="engine_metal" mass="2.0" contype="0" conaffinity="0"/>
+              <geom name="chamber" type="cylinder" pos="0 0 -0.06" size="0.06 0.05" material="engine_metal" mass="7.0" contype="0" conaffinity="0"/>
+              <geom name="throat" type="cylinder" pos="0 0 -0.10" size="0.03 0.02" material="engine_metal" mass="2.5" contype="0" conaffinity="0"/>
               
-              <!-- Multi-layer thrust plume for dynamic visualization (fade via rgba alpha) -->
-              <!-- FIXED: Initial alpha values set to visible (will be dynamically updated based on thrust) -->
-              <!-- Layer 1: Short plume (0-30% thrust) -->
-              <geom name="plume_short" type="capsule" fromto="0 0 -0.75 0 0 -1.2" size="0.10" rgba="0.98 0.5 0.1 0.6" contype="0" conaffinity="0" mass="0.001"/>
+              <!-- Nozzle Bell -->
+              <geom name="nozzle_1" type="cylinder" pos="0 0 -0.14" size="0.05 0.03" material="engine_metal" mass="2.0"/>
+              <geom name="nozzle_2" type="cylinder" pos="0 0 -0.18" size="0.07 0.03" material="engine_metal" mass="1.5"/>
+              <geom name="nozzle_exit" type="cylinder" pos="0 0 -0.22" size="0.09 0.01" material="engine_metal" mass="0.5"/>
               
-              <!-- Layer 2: Medium plume (30-60% thrust) -->
-              <geom name="plume_medium" type="capsule" fromto="0 0 -0.75 0 0 -2.0" size="0.12" rgba="0.98 0.5 0.1 0.5" contype="0" conaffinity="0" mass="0.001"/>
+              <!-- Exhaust Plumes -->
+              <geom name="plume_short" type="capsule" fromto="0 0 -0.25 0 0 -0.5" size="0.05" rgba="0.98 0.5 0.1 0.6" contype="0" conaffinity="0" mass="0.001"/>
+              <geom name="plume_medium" type="capsule" fromto="0 0 -0.25 0 0 -0.9" size="0.07" rgba="0.98 0.5 0.1 0.5" contype="0" conaffinity="0" mass="0.001"/>
+              <geom name="plume_long" type="capsule" fromto="0 0 -0.25 0 0 -1.4" size="0.08" rgba="0.98 0.5 0.1 0.4" contype="0" conaffinity="0" mass="0.001"/>
+              <geom name="plume_outer" type="capsule" fromto="0 0 -0.25 0 0 -1.6" size="0.10" rgba="0.9 0.4 0.05 0.3" contype="0" conaffinity="0" mass="0.001"/>
               
-              <!-- Layer 3: Long plume (60-100% thrust) -->
-              <geom name="plume_long" type="capsule" fromto="0 0 -0.75 0 0 -2.8" size="0.14" rgba="0.98 0.5 0.1 0.4" contype="0" conaffinity="0" mass="0.001"/>
-              
-              <!-- Outer dispersed plume -->
-              <geom name="plume_outer" type="capsule" fromto="0 0 -0.75 0 0 -3.2" size="0.18" rgba="0.9 0.4 0.05 0.3" contype="0" conaffinity="0" mass="0.001"/>
-              
-              <!-- Thrust measurement point -->
-              <site name="thrust_site" pos="0 0 -1.5" size="0.05" rgba="1 0.5 0 1"/>
+              <!-- Thrust Site -->
+              <site name="thrust_site" pos="0 0 -0.2" size="0.03" rgba="1 0.5 0 1"/>
             </body>
           </body>
         </body>
       </body>
     </body>
 
-    <!-- Enhanced camera setup for 3D training visualization -->
-    <!-- Default camera - custom user-defined position -->
-    <camera name="default_view" mode="fixed" pos="-98.627 -4.881 60.118" xyaxes="0.049 -0.999 0.000 0.519 0.026 0.854" fovy="45"/>
-    <camera name="follow" mode="trackcom" target="vehicle" pos="0 -12 6" fovy="50"/>
-    <camera name="chase" mode="track" target="vehicle" pos="0 -8 4" fovy="45"/>
-    <camera name="tvc_detail" mode="track" target="tvc_frame" pos="2 -3 -2" fovy="25"/>
-    <camera name="side_view" mode="track" target="vehicle" pos="8 0 4" fovy="40"/>
-    <camera name="top_down" mode="track" target="vehicle" pos="0 0 20" fovy="35"/>
-    <camera name="ground_view" mode="track" target="vehicle" pos="0 -4 1" fovy="60"/>
-    <camera name="cinematic" mode="track" target="vehicle" pos="-6 -10 8" fovy="55"/>
+    <!-- Default Camera: Moved closer for 2m rocket -->
+    <camera name="default_view" mode="fixed" pos="-6 -6 4" xyaxes="1 -1 0 0.5 0.5 1" fovy="50"/>
+    <camera name="follow" mode="trackcom" target="vehicle" pos="0 -5 1.5" fovy="60"/>
+    <camera name="chase" mode="track" target="vehicle" pos="0 -3 1" fovy="60"/>
+    <camera name="tvc_detail" mode="track" target="tvc_frame" pos="0.8 -0.8 -0.5" fovy="40"/>
   </worldbody>
 
-  <!-- 3D Control actuators: TVC + Thrust magnitude -->
   <actuator>
-    <!-- TVC gimbal control - POSITION SERVOS with PD control -->
-    <!-- Position servos with sufficient exploration noise CAN provide continuous control -->
-    <!-- The key: policy must learn to VARY outputs based on feedback, not output constants -->
-    <!-- kp = position gain (stiffness), kv = velocity gain (damping) -->
-    <!-- High kp/kv = fast, tight tracking; critical for responsive control -->
-    <!-- TUNING: Reduced kp 10000->5000 to fix vibration/jitter while maintaining hold -->
-    <!-- kp = position gain (stiffness), kv = velocity gain (damping) -->
-    <!-- High kp/kv = fast, tight tracking; critical for responsive control -->
-    <!-- TUNING: Increased stiffness 5000 -> 8000 for faster rise time (was sluggish at 280ms) -->
-    <position name="tvc_pitch" joint="tvc_x" kp="8000" kv="200" ctrlrange="-1 1"/>
-    <position name="tvc_yaw" joint="tvc_y" kp="8000" kv="200" ctrlrange="-1 1"/>
-
-  <!-- AI-controlled thrust magnitude: 8540 N max (matches dynamics.py) -->
-  <!-- FIXED: Using motor actuator for direct force control at thrust site -->
-  <!-- gear="0 0 8540 0 0 0" means: [force_x, force_y, force_z, torque_x, torque_y, torque_z] -->
-  <!-- Only force_z (index 2) is non-zero, applying 8540N upward thrust -->
-  <general name="thrust_control" site="thrust_site" ctrlrange="0 1" gear="0 0 8540 0 0 0" dyntype="none" gaintype="fixed" biastype="none"/>
+    <position name="tvc_pitch" joint="tvc_x" kp="5000" kv="200" ctrlrange="-1 1"/>
+    <position name="tvc_yaw" joint="tvc_y" kp="5000" kv="200" ctrlrange="-1 1"/>
+    <general name="thrust_control" site="thrust_site" ctrlrange="0 1" gear="0 0 8540 0 0 0" dyntype="none" gaintype="fixed" biastype="none"/>
   </actuator>
 
   <!-- Enhanced sensor suite for 3D state estimation -->
