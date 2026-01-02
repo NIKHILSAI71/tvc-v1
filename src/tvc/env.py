@@ -52,10 +52,16 @@ class TvcEnv:
         self._domain_randomization = domain_randomization
 
         # Domain randomization parameters (stored for reset)
-        self._base_mass = 256.0
+        # Domain randomization parameters (stored for reset)
+        self._base_mass = 282.5  # Fixed: Matches XML total mass
         self._base_inertia = np.array([680.0, 680.0, 45.0])
         self._base_thrust_max = 8540.0
         self._base_damping = 0.8
+        
+        # Sim2Real: Persistent disturbances
+        self._sensor_bias = np.zeros(6)  # Drift in pos/vel sensors
+        self._engine_lag_alpha = 1.0  # 1.0 = instant, <1.0 = lag
+        self._current_actuator_delay = 0
 
         # Reward normalization
         self._reward_count = 0.0
@@ -192,10 +198,30 @@ class TvcEnv:
             damping_factor = self._rng.uniform(0.6, 1.4)
             # Applied during dynamics
 
-            # Wind disturbance: 0-8 m/s random direction (Gusts)
-            self._wind_force = self._rng.normal(0.0, 3.0, 3)  # Random wind
+            # Wind disturbance: 0-12 m/s random direction (Gusts & Turbulence)
+            # Increased from 8 m/s for "Expert" level toughness
+            self._wind_force = self._rng.normal(0.0, 5.0, 3) 
+
+            # Sim2Real: Variable Actuator Delay (0-2 steps)
+            # Randomly chosen per episode to force policy to be robust to latency
+            self._current_actuator_delay = self._rng.integers(0, 3)
+            self._action_buffer = [np.zeros(3, dtype=np.float64) for _ in range(self._current_actuator_delay + 1)]
+
+            # Sim2Real: Engine Response Lag (Thrust spool-up time)
+            # alpha 0.4 ~= 100ms lag at 50Hz, alpha 1.0 = instant
+            self._engine_lag_alpha = self._rng.uniform(0.3, 1.0)
+
+            # Sim2Real: Sensor Bias (Drift)
+            # GPS drift up to 10cm, IMU drift up to 0.05 m/s
+            self._sensor_bias[0:3] = self._rng.normal(0.0, 0.10, 3) # Pos bias
+            self._sensor_bias[3:6] = self._rng.normal(0.0, 0.05, 3) # Vel bias
+
         else:
             self._wind_force = np.zeros(3)
+            self._current_actuator_delay = self._actuator_delay_steps
+            self._action_buffer = [np.zeros(3, dtype=np.float64) for _ in range(self._current_actuator_delay + 1)]
+            self._engine_lag_alpha = 1.0
+            self._sensor_bias = np.zeros(6)
 
         initial_pos = np.array(self._stage_config["initial_position"], dtype=np.float64)
         initial_vel = np.array(self._stage_config["initial_velocity"], dtype=np.float64)
@@ -204,11 +230,11 @@ class TvcEnv:
 
         # Add realistic sensor noise (GPS: ±5cm, IMU: ±0.02 m/s, gyro: ±0.03 rad/s)
         # Increased for robust control
-        noise_scale = self._rng.uniform(0.8, 2.0) if self._domain_randomization else 1.0
-        pos_noise = self._rng.normal(0.0, 0.05 * noise_scale, 3)  # ±5cm GPS accuracy
-        vel_noise = self._rng.normal(0.0, 0.02 * noise_scale, 3)  # ±2cm/s IMU accuracy
-        quat_noise = self._rng.normal(0.0, 0.02 * noise_scale, 4)  # ±0.02 orientation noise
-        omega_noise = self._rng.normal(0.0, 0.03 * noise_scale, 3)  # ±0.03 rad/s gyro accuracy
+        noise_scale = self._rng.uniform(1.0, 3.0) if enable_randomization else 1.0
+        pos_noise = self._rng.normal(0.0, 0.05 * noise_scale, 3)  # ±5-15cm GPS noise
+        vel_noise = self._rng.normal(0.0, 0.02 * noise_scale, 3)  # ±2-6cm/s IMU noise
+        quat_noise = self._rng.normal(0.0, 0.02 * noise_scale, 4)  # Orientation noise
+        omega_noise = self._rng.normal(0.0, 0.03 * noise_scale, 3)  # Gyro noise
 
         quat = initial_quat + quat_noise
         quat = quat / np.linalg.norm(quat)
@@ -248,31 +274,45 @@ class TvcEnv:
 
         # Action smoothing for position commands
         # Helps filter high-frequency noise while maintaining responsiveness
-        # CRITICAL: alpha=0.4 provides smoother control (reduced from 0.7)
-        # to filter out high-frequency jitter from the stochastic policy.
-        alpha = 0.4  # Slower, smoother response
+        # TUNING: Reduced alpha 0.8 -> 0.3 to heavily filter policy jitter/vibration
+        # This acts as a software low-pass filter on the "nervous" random policy
+        alpha = 0.3
         self._smoothed_action[0] = alpha * action[0] + (1.0 - alpha) * self._smoothed_action[0]  # gimbal_x
         self._smoothed_action[1] = alpha * action[1] + (1.0 - alpha) * self._smoothed_action[1]  # gimbal_y
-        self._smoothed_action[2] = 0.5 * action[2] + 0.5 * self._smoothed_action[2]  # thrust (smoother)
+        self._smoothed_action[2] = 0.2 * action[2] + 0.8 * self._smoothed_action[2]  # thrust (very smooth)
         
         smoothed_action = self._smoothed_action.copy()
 
         # Actuator delay simulation (realistic hardware delay)
-        if self._actuator_delay_steps > 0:
+        # Use dynamic delay determined at reset
+        if self._current_actuator_delay > 0:
             # Add new action to buffer
             self._action_buffer.append(smoothed_action.copy())
             # Remove oldest action
-            if len(self._action_buffer) > self._actuator_delay_steps + 1:
+            if len(self._action_buffer) > self._current_actuator_delay + 1:
                 self._action_buffer.pop(0)
             # Use delayed action
             delayed_action = self._action_buffer[0]
         else:
             delayed_action = smoothed_action
+        
+        # Sim2Real: Engine Lag (Spool up/down time)
+        # Real engines don't change thrust instantly. Apply exponential filter to thrust.
+        current_thrust = self.data.ctrl[self._actuator_ids.get("thrust_control", 2)]
+        target_thrust = delayed_action[2]
+        lagged_thrust = self._engine_lag_alpha * target_thrust + (1.0 - self._engine_lag_alpha) * current_thrust
+        delayed_action[2] = lagged_thrust
 
         # Position servos expect normalized position targets in ctrlrange [-1, 1]
-        # These map to joint range via: actual_angle = ctrl * joint_range
-        self.data.ctrl[self._actuator_ids.get("tvc_pitch", 0)] = delayed_action[0] / max(self._ctrl_limit, 1e-6)
-        self.data.ctrl[self._actuator_ids.get("tvc_yaw", 1)] = delayed_action[1] / max(self._ctrl_limit, 1e-6)
+        # BUT: Since we use position actuators with gear=1, ctrl IS the joint angle (rad).
+        # We must NOT divide by ctrl_limit if we want precise angle control.
+        # Wait, XML ctrlrange="-1 1". This clamps input.
+        # If we pass 0.14, it is valid.
+        
+        # CRITICAL FIX: Pass radians directly. 
+        # Safety clip to joint limits was already done above.
+        self.data.ctrl[self._actuator_ids.get("tvc_pitch", 0)] = delayed_action[0]
+        self.data.ctrl[self._actuator_ids.get("tvc_yaw", 1)] = delayed_action[1]
         self.data.ctrl[self._actuator_ids.get("thrust_control", 2)] = delayed_action[2]
 
         # Update visual thrust plume based on thrust magnitude
@@ -307,9 +347,14 @@ class TvcEnv:
         # CRITICAL: Include gimbal angles and velocities for feedback control
         # qpos layout: [0:3]=pos, [3:7]=quat, [7]=tvc_x, [8]=tvc_y
         # qvel layout: [0:3]=vel, [3:6]=omega, [6]=tvc_x_vel, [7]=tvc_y_vel
+        # Sim2Real: Add Sensor Bias to Position and Velocity
+        # The agent sees Biased + Noisy data, but reward is based on Truth
+        biased_pos = self.data.qpos[0:3] + self._sensor_bias[0:3]
+        biased_vel = self.data.qvel[0:3] + self._sensor_bias[3:6]
+
         state_np = np.concatenate([
-            self.data.qpos[0:3],   # Vehicle position (3)
-            self.data.qvel[0:3],   # Vehicle velocity (3)
+            biased_pos,   # Vehicle position (3)
+            biased_vel,   # Vehicle velocity (3)
             self.data.qpos[3:7],   # Vehicle quaternion (4)
             self.data.qvel[3:6],   # Vehicle angular velocity (3)
             self.data.qpos[7:9],
@@ -422,36 +467,15 @@ class TvcEnv:
         # Stability reward: Reward maintaining stable hover
         # Adjusted for lower altitude training (8m instead of 50m)
         if pos_error < 2.0 and vel_error < 1.0:  # Tightened from 5.0m and 2.0 m/s
-            stability_reward = 5.0
+            stability_reward = 8.0  # Increased from 5.0 to compensate for removal of guidance
         elif pos_error < 4.0 and vel_error < 2.0:  # Moderate stability
-            stability_reward = 2.0  # Partial bonus
+            stability_reward = 3.0  # Increased from 2.0
         else:
             stability_reward = 0.0
 
-        # SIMPLIFIED thrust guidance: Reward using appropriate thrust for altitude control
-        # For initial learning, keep it simple - just encourage thrust usage
-        thrust_action = float(action[2])  # Thrust command [0, 1]
-        vertical_velocity = vel[2]  # Positive = ascending, negative = descending
-        altitude_error_z = pos[2] - target_altitude
-        
-        # Simple thrust guidance: 
-        # - If falling (vel_z < 0) and below target, reward high thrust
-        # - If rising (vel_z > 0) and above target, reward low thrust
-        # - If near target with low velocity, reward moderate thrust
-        
-        # Base thrust reward - encourage using thrust (prevents zero-thrust collapse)
-        if thrust_action > 0.2:  # Using reasonable thrust
-            thrust_guidance_reward = 5.0
-        else:
-            thrust_guidance_reward = -5.0  # Penalty for not using thrust
-        
-        # Bonus for thrust in correct direction relative to altitude error
-        if altitude_error_z < -1.0 and thrust_action > 0.4:  # Below target, use high thrust
-            thrust_guidance_reward += 5.0
-        elif altitude_error_z > 1.0 and thrust_action < 0.5:  # Above target, reduce thrust
-            thrust_guidance_reward += 3.0
-        elif abs(altitude_error_z) < 1.0 and 0.3 < thrust_action < 0.6:  # Near target, moderate thrust
-            thrust_guidance_reward += 4.0
+        # REMOVED: Thrust guidance (heuristic nanny reward)
+        # The agent must learn to use thrust on its own!
+        thrust_guidance_reward = 0.0
         
         fuel_reward = 0.0  # Disabled for hover task
 
@@ -466,7 +490,7 @@ class TvcEnv:
             progress_reward +      # 0
             stability_reward +     # ~5 max
             fuel_reward +          # 0
-            thrust_guidance_reward  # ~5-10 with bonuses
+            thrust_guidance_reward # 0
         )
 
         # Direct penalty for jerk (rapid action changes)

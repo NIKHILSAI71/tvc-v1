@@ -48,13 +48,20 @@ class PolicyConfig:
     """Policy network configuration for 3D TVC."""
     hidden_dims: Tuple[int, ...] = (512, 512, 256, 128)
     activation: Callable[[jnp.ndarray], jnp.ndarray] = nn.silu
-    log_std_init: float = -0.3
-    log_std_min: float = -2.5   # Allow tighter control when converged
-    log_std_max: float = 0.3    # Allow higher exploration (std up to 1.35)
+    hidden_dims: Tuple[int, ...] = (512, 512, 256, 128)
+    activation: Callable[[jnp.ndarray], jnp.ndarray] = nn.silu
+    # STABILITY FIX: Reduced initial noise to prevent violent shaking
+    # -1.2 ~= 0.3 std (was -0.3 ~= 0.74 std)
+    log_std_init: float = -1.2
+    log_std_min: float = -4.0   # Allow very high precision
+    log_std_max: float = 0.0    # Cap max noise (std=1.0)
     dropout_rate: float = 0.0
     use_layer_norm: bool = True
     action_limit: float = 0.14  # Gimbal angle limit (±8° = 0.14 rad)
     thrust_limit: float = 1.0   # Thrust fraction [0, 1]
+    # Initialize thrust bias to hover throttle (0.32)
+    # logit(0.32) = -0.75. Using -1.0 is safe.
+    thrust_init_bias: float = -1.0  
     action_dims: int = 3        # 3D: [gimbal_x_angle, gimbal_y_angle, thrust]
 
 
@@ -77,7 +84,11 @@ class ActorCritic(nn.Module):
         # Policy head: [gimbal_x, gimbal_y, thrust]
         mean_raw = nn.Dense(3, name="policy_head")(x)
         gimbal_mean = jnp.tanh(mean_raw[:2]) * self.config.action_limit
-        thrust_mean = nn.sigmoid(mean_raw[2:3]) * self.config.thrust_limit
+        
+        # Thrust: Sigmoid + Bias for good initialization
+        # Extract thrust logit (raw 3rd component) and add bias
+        thrust_logit = mean_raw[2:3] + self.config.thrust_init_bias
+        thrust_mean = nn.sigmoid(thrust_logit) * self.config.thrust_limit
         mean = jnp.concatenate([gimbal_mean, thrust_mean])
 
         # Value head

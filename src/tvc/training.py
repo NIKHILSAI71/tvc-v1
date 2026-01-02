@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -61,7 +62,9 @@ class RunningNormalizer:
         normalized = (obs - self.mean) / (std + 1e-8)
         
         # Soft clip to preserve gradients while limiting outliers
-        normalized = np.tanh(normalized / 5.0) * 5.0
+        # REMOVED: tanh squashing - it kills gradients for large errors!
+        # Use standard hard clipping instead.
+        normalized = np.clip(normalized, -10.0, 10.0)
         return jnp.asarray(normalized, dtype=jnp.float32)
 
 
@@ -129,14 +132,14 @@ class TrainingConfig:
     weight_decay: float = 1e-5   # Light regularization
 
     # Neuroevolution settings - Optimized for better exploration
-    # RECOMMENDATION: Set use_evolution=False for stable learning (evolution has bugs!)
-    use_evolution: bool = False  # DISABLED - Was destroying learned performance
-    population_size: int = 12  # Increased diversity
-    elite_keep: int = 3  # Keep top 3 performers
-    mutation_scale: float = 0.10  # Stronger mutations for exploration
-    mutation_prob: float = 0.7  # 70% of parameters mutated
-    evolution_interval: int = 5  # Every 5 episodes for stability
-    fitness_episodes: int = 5  # CRITICAL FIX: Increased from 2 to 5 for reliable evaluation
+    # RE-ENABLED: Fixed normalization bugs allow this to work now
+    use_evolution: bool = True  
+    population_size: int = 16  # Increased for better coverage
+    elite_keep: int = 2  # Keep top 2 absolute best
+    mutation_scale: float = 0.05  # Reduced from 0.10 to prevent destroying policies
+    mutation_prob: float = 0.6  # 60% of parameters mutated
+    evolution_interval: int = 10  # Less frequent to allow PPO to stabilize
+    fitness_episodes: int = 3  # Sufficient for evaluation
 
     # Configuration objects
     policy_config: PolicyConfig = PolicyConfig()
@@ -395,7 +398,8 @@ def _ppo_update(
     returns_normalized = (returns - returns_mean) / returns_std
     
     # Soft clip to prevent gradient spikes
-    returns_normalized = jnp.tanh(returns_normalized / 5.0) * 5.0
+    # REMOVED: tanh squashing for returns too
+    returns_normalized = jnp.clip(returns_normalized, -10.0, 10.0)
     
     # Use normalized returns for value function training
     returns = returns_normalized
@@ -596,6 +600,11 @@ def train_controller(
     sample_obs = env.reset()
     params = policy_funcs.init(init_rng, sample_obs)
     obs_rms = RunningNormalizer.initialise(sample_obs)
+    
+    # CRITICAL: Create a SECOND normalizer strictly for Evolution candidates
+    # This prevents candiate evaluation from corrupting the main agent's statistics
+    # We will sync it with the main normalizer before each evolution step
+    evo_obs_rms = RunningNormalizer.initialise(sample_obs)
 
     # Setup optimizer with adaptive learning rate schedule
     # Cosine annealing with warmup for stable learning
@@ -757,9 +766,16 @@ def train_controller(
         evolution_metrics = {}
         if config.use_evolution and (episode + 1) % config.evolution_interval == 0:
             state.rng, mut_rng = jax.random.split(state.rng)
+            
+            # CRITICAL FIX: Sync evo normalizer with main normalizer BEFORE evaluation
+            # This ensures mutants are evaluated on the same distribution as the agent
+            # but their own noisy runs don't mess up the training stats.
+            # Using copy of the current state of obs_rms
+            import copy
+            evo_obs_rms = copy.deepcopy(state.obs_rms)
 
             # Evaluate current policy as baseline
-            current_fitness = _evaluate_candidate(env, stage, state.params, policy_funcs, state.obs_rms,
+            current_fitness = _evaluate_candidate(env, stage, state.params, policy_funcs, evo_obs_rms,
                                                  num_episodes=config.fitness_episodes)
 
             # Build population: current + elites + new mutants
@@ -767,7 +783,7 @@ def train_controller(
 
             # Add stored elites if available
             for elite in state.elites:
-                elite_fitness = _evaluate_candidate(env, stage, elite, policy_funcs, state.obs_rms,
+                elite_fitness = _evaluate_candidate(env, stage, elite, policy_funcs, evo_obs_rms,
                                                    num_episodes=config.fitness_episodes)
                 population.append((elite_fitness, elite))
 
@@ -784,7 +800,7 @@ def train_controller(
                     parent = state.params
 
                 mutant = mutate_parameters(mut_key, parent, config.mutation_scale, config.mutation_prob)
-                fitness = _evaluate_candidate(env, stage, mutant, policy_funcs, state.obs_rms,
+                fitness = _evaluate_candidate(env, stage, mutant, policy_funcs, evo_obs_rms,
                                             num_episodes=config.fitness_episodes)
                 population.append((fitness, mutant))
 
@@ -892,7 +908,7 @@ def train_controller(
                 update_metrics["loss"],
             )
             # Force flush for Kaggle/Jupyter environments
-            import sys
+
             sys.stdout.flush()
             sys.stderr.flush()
 

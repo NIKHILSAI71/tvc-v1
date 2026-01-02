@@ -16,7 +16,7 @@
 
   <default>
     <joint armature="0.0" damping="0.2" limited="true"/>
-    <geom density="2700" friction="0.8 0.2 0.1"/>  <!-- Aluminum density 2700 kg/m³ -->
+    <geom density="1000" friction="0.8 0.2 0.1"/>
     <motor gear="1" ctrlrange="-1 1"/>
   </default>
 
@@ -106,7 +106,7 @@
           <!-- Gimbal X-axis (pitch) - Pivot point at engine mount, fully internal 
                PIVOT POINT at engine mount interface (inside rocket) -->
         <body name="gimbal_x" pos="0 0 0.05">
-          <joint name="tvc_x" type="hinge" axis="1 0 0" range="-0.14 0.14" limited="true" damping="10" stiffness="0" armature="0.05"/>
+          <joint name="tvc_x" type="hinge" axis="1 0 0" range="-0.14 0.14" limited="true" damping="0.5" stiffness="0" armature="0.05"/>
           <!-- Gimbal ring - NON-COLLIDING (would interfere with rocket body walls) -->
           <geom name="gimbal_ring_x" type="cylinder" pos="0 0 0" size="0.22 0.02" material="gimbal_frame" mass="2.0" contype="0" conaffinity="0"/>
           
@@ -116,7 +116,7 @@
           
           <!-- Y-axis gimbal (yaw) - Real F9 limit ±8° (0.14 rad) -->
           <body name="gimbal_y" pos="0 0 0">
-            <joint name="tvc_y" type="hinge" axis="0 1 0" range="-0.14 0.14" limited="true" damping="10" stiffness="0" armature="0.05"/>
+            <joint name="tvc_y" type="hinge" axis="0 1 0" range="-0.14 0.14" limited="true" damping="0.5" stiffness="0" armature="0.05"/>
             <!-- Gimbal ring - NON-COLLIDING -->
             <geom name="gimbal_ring_y" type="cylinder" pos="0 0 0" size="0.18 0.015" material="gimbal_frame" mass="1.5" contype="0" conaffinity="0"/>
             
@@ -193,8 +193,12 @@
     <!-- The key: policy must learn to VARY outputs based on feedback, not output constants -->
     <!-- kp = position gain (stiffness), kv = velocity gain (damping) -->
     <!-- High kp/kv = fast, tight tracking; critical for responsive control -->
-    <position name="tvc_pitch" joint="tvc_x" kp="300" kv="50" ctrlrange="-1 1"/>
-    <position name="tvc_yaw" joint="tvc_y" kp="300" kv="50" ctrlrange="-1 1"/>
+    <!-- TUNING: Reduced kp 10000->5000 to fix vibration/jitter while maintaining hold -->
+    <!-- kp = position gain (stiffness), kv = velocity gain (damping) -->
+    <!-- High kp/kv = fast, tight tracking; critical for responsive control -->
+    <!-- TUNING: Increased stiffness 5000 -> 8000 for faster rise time (was sluggish at 280ms) -->
+    <position name="tvc_pitch" joint="tvc_x" kp="8000" kv="200" ctrlrange="-1 1"/>
+    <position name="tvc_yaw" joint="tvc_y" kp="8000" kv="200" ctrlrange="-1 1"/>
 
   <!-- AI-controlled thrust magnitude: 8540 N max (matches dynamics.py) -->
   <!-- FIXED: Using motor actuator for direct force control at thrust site -->

@@ -153,7 +153,30 @@ def build_curriculum() -> List[CurriculumStage]:
         min_episodes=80,
     )
 
-    return [hover_stage, lateral_stage, climb_stage, descent_stage, landing_stage]
+    # Stage 6: EXPERT (Real World Chaos) - Unbeatable Adaptation
+    # Full disturbances enabled by env randomization, strict tolerances
+    expert_stage = CurriculumStage(
+        name="expert_storm_landing",
+        episodes=500,  # Long mastery phase
+        target_position=(0.0, 0.0, 1.0),  # Precision touchdown
+        target_orientation=(1.0, 0.0, 0.0, 0.0),
+        target_velocity=(0.0, 0.0, -0.2),  # Gentle touch
+        target_angular_velocity=(0.0, 0.0, 0.0),
+        initial_position=(0.0, 0.0, 20.0),  # Start higher
+        initial_velocity=(0.0, 0.0, -2.0),
+        initial_orientation=(1.0, 0.0, 0.0, 0.0),
+        initial_angular_velocity=(0.0, 0.0, 0.0),
+        position_tolerance=0.4,  # Sub-meter precision
+        velocity_tolerance=0.3,
+        orientation_tolerance=0.05,  # Razor sharp < 6 degrees
+        angular_velocity_tolerance=0.1,
+        tolerance_bonus=1.0,  # Huge bonus for perfection
+        reward_threshold=0.28,
+        success_episodes=10,  # Must prove it consistently
+        min_episodes=100,
+    )
+
+    return [hover_stage, lateral_stage, climb_stage, descent_stage, landing_stage, expert_stage]
 
 
 def select_stage(curriculum: List[CurriculumStage], episode: int) -> CurriculumStage:
