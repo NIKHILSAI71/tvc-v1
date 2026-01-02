@@ -48,12 +48,11 @@ LOGGER = logging.getLogger(__name__)
 def cmd_train(args) -> int:
     """Train a new TVC controller model."""
     from .dynamics import RocketParams
-    from .mpc import MpcConfig
     from .policies import PolicyConfig
     from .training import TrainingConfig, train_controller
 
     LOGGER.info("=" * 60)
-    LOGGER.info("TVC 3D Training - MPC + PPO + Evolution")
+    LOGGER.info("TVC 3D Training - PPO + Evolution")
     LOGGER.info("-" * 60)
     LOGGER.info("Episodes:       %d", args.episodes)
     LOGGER.info("Evolution:      %s", "Enabled" if args.use_evolution else "Disabled")
@@ -73,12 +72,6 @@ def cmd_train(args) -> int:
         log_std_init=-1.5,  # Reduced noise for smoother initial actions
     )
 
-    mpc_config = MpcConfig(
-        gimbal_limit=0.14,  # Match XML gimbal limit
-        horizon=12,
-        iterations=60,
-    )
-
     rocket_params = RocketParams(
         mass=45.0,
         inertia=(120.0, 120.0, 8.0),
@@ -93,7 +86,6 @@ def cmd_train(args) -> int:
         num_epochs=args.num_epochs,
         minibatch_size=args.minibatch_size,
         policy_config=policy_config,
-        mpc_config=mpc_config,
         rocket_params=rocket_params,
         use_evolution=args.use_evolution,
     )

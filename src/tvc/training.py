@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sys
 import time
 from dataclasses import dataclass, field
@@ -18,9 +19,6 @@ import optax
 from flax import serialization
 from jax import Array
 
-from .curriculum import CurriculumStage, build_curriculum
-from .dynamics import RocketParams
-from .env import TvcEnv
 from .curriculum import CurriculumStage, build_curriculum
 from .dynamics import RocketParams
 from .env import TvcEnv

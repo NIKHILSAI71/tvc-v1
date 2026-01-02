@@ -231,7 +231,16 @@ class TvcEnv:
         # Add realistic sensor noise (GPS: ±5cm, IMU: ±0.02 m/s, gyro: ±0.03 rad/s)
         # Increased for robust control
         noise_scale = self._rng.uniform(1.0, 3.0) if enable_randomization else 1.0
-        pos_noise = self._rng.normal(0.0, 0.05 * noise_scale, 3)  # ±5-15cm GPS noise
+        
+        # STRENGTHENED: For hover stabilization, add significant offset to force correction
+        # This prevents "Null-Op Success" where agent just spawns at target and wins
+        if getattr(self, "_stage_config", {}).get("stage_name") == "hover_stabilization":
+             # ±0.5m - 0.8m initial error
+             pos_noise = self._rng.uniform(-0.8, 0.8, 3) 
+             # Ensure Z doesn't go below safety margins (start at 8m, so -0.8 is fine)
+        else:
+             pos_noise = self._rng.normal(0.0, 0.05 * noise_scale, 3)  # Standard GPS noise
+             
         vel_noise = self._rng.normal(0.0, 0.02 * noise_scale, 3)  # ±2-6cm/s IMU noise
         quat_noise = self._rng.normal(0.0, 0.02 * noise_scale, 4)  # Orientation noise
         omega_noise = self._rng.normal(0.0, 0.03 * noise_scale, 3)  # Gyro noise
@@ -572,7 +581,11 @@ class TvcEnv:
         omega_magnitude = np.linalg.norm(omega)
         
         # Early success termination - achieves goal state
-        if (pos_error < self._stage_config["position_tolerance"] * 0.8 and  # Within 80% of tolerance
+        # CRITICAL: Disabled for hover_stabilization to force duration holding
+        is_hover_stage = self._stage_config.get("stage_name") == "hover_stabilization"
+        
+        if (not is_hover_stage and  # Only allow early finish for non-hover stages (e.g. landing)
+            pos_error < self._stage_config["position_tolerance"] * 0.8 and  # Within 80% of tolerance
             vel_error < self._stage_config["velocity_tolerance"] * 0.8 and
             orient_alignment > 0.98 and  # Within ~11 degrees
             omega_magnitude < self._stage_config["angular_velocity_tolerance"] * 0.8):
