@@ -8,31 +8,39 @@ from pathlib import Path
 sys.stdout.reconfigure(line_buffering=True) if hasattr(sys.stdout, 'reconfigure') else None
 sys.stderr.reconfigure(line_buffering=True) if hasattr(sys.stderr, 'reconfigure') else None
 
-# Configure logging with immediate flushing
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    force=True,  # Force reconfiguration even if logging was previously configured
-    stream=sys.stdout  # Explicitly use stdout
-)
+# ANSI Color Codes
+class Colors:
+    RESET = "\033[0m"
+    GREY = "\033[90m"
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    RED = "\033[91m"
+    CYAN = "\033[96m"
+    BOLD = "\033[1m"
 
-# Add a custom handler that flushes after every log
-class FlushStreamHandler(logging.StreamHandler):
-    def emit(self, record):
-        super().emit(record)
-        self.flush()
+class ColoredFormatter(logging.Formatter):
+    """Custom formatter with ANSI colors."""
+    
+    FORMAT = "%(asctime)s | %(levelname)-8s | %(message)s"
+    
+    FORMATS = {
+        logging.DEBUG: Colors.GREY + FORMAT + Colors.RESET,
+        logging.INFO: Colors.GREEN + FORMAT + Colors.RESET,
+        logging.WARNING: Colors.YELLOW + FORMAT + Colors.RESET,
+        logging.ERROR: Colors.RED + FORMAT + Colors.RESET,
+        logging.CRITICAL: Colors.RED + Colors.BOLD + FORMAT + Colors.RESET,
+    }
 
-# Replace default handler with flushing handler
-logger = logging.getLogger()
-logger.handlers.clear()
-handler = FlushStreamHandler(sys.stdout)
-handler.setFormatter(logging.Formatter(
-    "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-))
-logger.addHandler(handler)
-logger.setLevel(logging.INFO)
+    def format(self, record):
+        log_fmt = self.FORMATS.get(record.levelno)
+        formatter = logging.Formatter(log_fmt, datefmt="%H:%M:%S")
+        return formatter.format(record)
+
+# Configure logging
+handler = logging.StreamHandler(sys.stdout)
+handler.setFormatter(ColoredFormatter())
+logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
+LOGGER = logging.getLogger(__name__)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -45,13 +53,15 @@ def cmd_train(args) -> int:
     from .training import TrainingConfig, train_controller
 
     LOGGER.info("=" * 60)
-    LOGGER.info("TVC 3D Training - Production Clean Version")
-    LOGGER.info("=" * 60)
-    LOGGER.info("Episodes: %d", args.episodes)
+    LOGGER.info("TVC 3D Training - MPC + PPO + Evolution")
+    LOGGER.info("-" * 60)
+    LOGGER.info("Episodes:       %d", args.episodes)
+    LOGGER.info("Evolution:      %s", "Enabled" if args.use_evolution else "Disabled")
     LOGGER.info("Seed: %d", args.seed)
     LOGGER.info("Learning Rate: %.2e", args.learning_rate)
     LOGGER.info("Rollout Length: %d", args.rollout_length)
     LOGGER.info("Output: %s", args.output_dir)
+    LOGGER.info("Visualization: %s", "Enabled" if args.visualize else "Disabled (use --visualize to enable)")
     LOGGER.info("=" * 60)
 
     # Setup training configuration
@@ -85,6 +95,7 @@ def cmd_train(args) -> int:
         policy_config=policy_config,
         mpc_config=mpc_config,
         rocket_params=rocket_params,
+        use_evolution=args.use_evolution,
     )
 
     # Run training
@@ -228,6 +239,7 @@ def main() -> int:
     train_parser.add_argument("--minibatch-size", type=int, default=256, help="PPO minibatch size (optimized)")
     train_parser.add_argument("--resume-from", type=str, default=None, help="Resume from checkpoint (e.g., checkpoints/policy_ep0100.msgpack)")
     train_parser.add_argument("--visualize", action="store_true", help="Show live visualization of the training process")
+    train_parser.add_argument("--use-evolution", action="store_true", help="Enable Neuroevolution population-based training")
 
     # Evaluate command
     eval_parser = subparsers.add_parser(

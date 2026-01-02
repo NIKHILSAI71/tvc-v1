@@ -30,14 +30,75 @@ class RocketParams:
         gravity: Gravitational acceleration (m/s²) - Earth standard.
         tvc_limit: Maximum TVC gimbal angle (radians) - real F9 limit ~±8°.
     """
-    mass: float = 256.0  # 1:100 scale of F9 empty mass (25,600 kg)
-    inertia: Tuple[float, float, float] = (680.0, 680.0, 45.0)  # Realistic cylindrical body ratios
-    thrust_max: float = 8540.0  # 1:100 scale of Merlin 1D (854 kN) → T/W = 3.4
-    thrust_min: float = 3416.0  # 40% throttle (real Merlin minimum)
-    arm: float = 2.0  # Engine to CoM distance
-    damping: Tuple[float, float, float] = (0.4, 0.2, 0.8)  # Reduced for high-altitude flight
-    gravity: float = 9.81  # Earth surface gravity
-    tvc_limit: float = 0.14  # ±8 degrees gimbal (real F9 spec)
+    mass: float = 280.0  # Matches MuJoCo XML total mass (~280kg)
+    inertia: Tuple[float, float, float] = (600.0, 600.0, 10.0)  # Matches 5m tall, 0.5m wide cylinder
+    thrust_max: float = 8540.0  # 1:100 scale of Merlin 1D
+    thrust_min: float = 3416.0  # 40% throttle
+    arm: float = 3.5  # Matches XML thrust site location relative to CoM (~-3.9m)
+    damping: Tuple[float, float, float] = (0.4, 0.2, 0.8)
+    gravity: float = 9.81
+    tvc_limit: float = 0.14  # ±8 degrees gimbal
+
+    @classmethod
+    def from_model(cls, model) -> "RocketParams":
+        """Extract parameters automatically from MuJoCo model."""
+        import numpy as np
+        import mujoco
+
+        # Mass (use subtree mass of vehicle body to capture all attached geoms)
+        vehicle_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "vehicle")
+        if vehicle_id < 0:
+            raise ValueError("Body 'vehicle' not found in model")
+        mass = float(model.body_subtreemass[vehicle_id])
+
+        # Inertia
+        inertia = model.body_inertia[vehicle_id]
+        
+        # Thrust (extract from actuator gear)
+        thrust_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, "thrust_control")
+        if thrust_id < 0:
+            raise ValueError("Actuator 'thrust_control' not found")
+        # Gear is [fx, fy, fz, tx, ty, tz], we want fz (index 2)
+        thrust_max = float(model.actuator_gear[thrust_id, 2])
+        thrust_min = thrust_max * 0.4  # Assume 40% min throttle
+
+        # TVC Limit
+        joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "tvc_x")
+        if joint_id < 0:
+            raise ValueError("Joint 'tvc_x' not found")
+        tvc_limit = float(model.jnt_range[joint_id, 1])
+
+        # Arm length (distance from CoM to thrust site)
+        # Note: We need bind pose positions.
+        # vehicle pos is usually origin of body frame.
+        # thrust_site pos is relative to body.
+        thrust_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "thrust_site")
+        vehicle_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "vehicle_cg")
+        
+        if thrust_site_id >= 0 and vehicle_site_id >= 0:
+            # Create data to compute global positions (kinematics)
+            data = mujoco.MjData(model)
+            mujoco.mj_kinematics(model, data)
+            
+            # Get global positions
+            thrust_pos = data.site_xpos[thrust_site_id]
+            cg_pos = data.site_xpos[vehicle_site_id]
+            
+            # Arm is scalar distance
+            arm = float(np.linalg.norm(thrust_pos - cg_pos))
+        else:
+            raise ValueError("Critical: 'thrust_site' or 'vehicle_cg' sites missing in XML. Cannot calculate lever arm.")
+
+        return cls(
+            mass=mass,
+            inertia=(float(inertia[0]), float(inertia[1]), float(inertia[2])),
+            thrust_max=thrust_max,
+            thrust_min=thrust_min,
+            arm=arm,
+            tvc_limit=tvc_limit,
+            damping=(0.4, 0.2, 0.8),  # Keep default damping (not easily extracted)
+            gravity=float(abs(model.opt.gravity[2]))
+        )
 
 
 def quaternion_multiply(q1: jnp.ndarray, q2: jnp.ndarray) -> jnp.ndarray:

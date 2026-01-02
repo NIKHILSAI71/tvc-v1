@@ -28,7 +28,7 @@ LOGGER = logging.getLogger(__name__)
 
 @dataclass
 class RunningNormalizer:
-    """Welford's online normalization."""
+    """Welford's online normalization with stable updates."""
     count: float = 0.0
     mean: np.ndarray = field(default_factory=lambda: np.zeros((0,), dtype=np.float32))
     m2: np.ndarray = field(default_factory=lambda: np.zeros((0,), dtype=np.float32))
@@ -40,26 +40,28 @@ class RunningNormalizer:
 
     def normalize(self, observation: np.ndarray, update_stats: bool = True) -> jnp.ndarray:
         obs = np.asarray(observation, dtype=np.float32)
-        if self.mean.size == 0 or self.mean.shape != obs.shape or self.count < 1.0:
+        if self.mean.size == 0 or self.mean.shape != obs.shape:
             self.count = 1.0
             self.mean = obs.copy()
             self.m2 = np.zeros_like(obs)
             return jnp.asarray(obs, dtype=jnp.float32)
 
-        # CRITICAL FIX: Only update statistics during warmup period (first 10k steps)
-        # After warmup, freeze the normalization to prevent distribution shift
-        # This prevents previously learned behaviors from becoming invalid
-        if update_stats and self.count < 10000:
+        # Robust Welford algorithm
+        # Never freeze completely - allows adapting to curriculum changes
+        if update_stats:
             self.count += 1.0
             delta = obs - self.mean
             self.mean = self.mean + delta / self.count
             delta2 = obs - self.mean
-            self.m2 = self.m2 + delta * delta2
+            self.m2 = self.mean + delta * delta2
         
-        variance = np.maximum(self.m2 / max(self.count, 1.0), 1e-6)
-        normalized = (obs - self.mean) / np.sqrt(variance)
-        # Clip to prevent extreme values
-        normalized = np.clip(normalized, -10.0, 10.0)
+        # Calculate variance with safe division
+        variance = np.maximum(self.m2 / max(self.count, 1.0), 1e-4)
+        std = np.sqrt(variance)
+        normalized = (obs - self.mean) / (std + 1e-8)
+        
+        # Soft clip to preserve gradients while limiting outliers
+        normalized = np.tanh(normalized / 5.0) * 5.0
         return jnp.asarray(normalized, dtype=jnp.float32)
 
 
@@ -386,16 +388,14 @@ def _ppo_update(
     advantages = (advantages - jnp.mean(advantages)) / (jnp.std(advantages) + 1e-8)
     advantages = jnp.nan_to_num(advantages, nan=0.0)
 
-    # CRITICAL FIX: Normalize returns for value function training stability
-    # While we don't normalize rewards (to preserve learning signal),
-    # we MUST normalize returns for the value function to prevent explosion
-    # The value function needs to predict in a reasonable range [-3, +3]
-    # This prevents gradient explosion when returns are 100k+
+    # Normalize returns for value function training stability
+    # Use robust scaling to handle outliers from sparse rewards
     returns_mean = jnp.mean(returns)
-    returns_std = jnp.std(returns) + 1e-8
+    returns_std = jnp.std(returns) + 1e-4
     returns_normalized = (returns - returns_mean) / returns_std
-    returns_normalized = jnp.nan_to_num(returns_normalized, nan=0.0)
-    returns_normalized = jnp.clip(returns_normalized, -10.0, 10.0)  # Prevent extreme values
+    
+    # Soft clip to prevent gradient spikes
+    returns_normalized = jnp.tanh(returns_normalized / 5.0) * 5.0
     
     # Use normalized returns for value function training
     returns = returns_normalized
@@ -561,19 +561,26 @@ def train_controller(
     visualize: bool = False,
 ) -> TrainingState:
     """Enhanced PPO + Evolution training with visualization."""
-
-    LOGGER.info("=" * 80)
-    LOGGER.info("🚀 ENHANCED TVC TRAINING - PPO + Evolution")
-    LOGGER.info("=" * 80)
-    LOGGER.info("Episodes: %d | Rollout: %d | Evolution: %s",
-               total_episodes, config.rollout_length, config.use_evolution)
-    LOGGER.info("=" * 80)
-    import sys
-    sys.stdout.flush()
-    sys.stderr.flush()
     
     # CRITICAL: Use 300 steps for rapid learning (not 1000)
     env = TvcEnv(dt=0.02, ctrl_limit=0.14, max_steps=300, seed=seed)
+    
+    # AUTOMATIC PHYSICS SYNC
+    # Extract "Ground Truth" physics from the loaded MuJoCo XML
+    # This ensures the Controller (Brain) matches the Simulation (Body)
+    real_params = config.rocket_params.from_model(env.model)
+    
+    # Update config with realistic parameters
+    import dataclasses
+    config = dataclasses.replace(config, rocket_params=real_params)
+    
+    LOGGER.info("Physics Synced from XML:")
+    LOGGER.info("   Mass: %.2f kg", real_params.mass)
+    LOGGER.info("   Arm:  %.2f m", real_params.arm)
+    LOGGER.info("   Thrust Max: %.2f N", real_params.thrust_max)
+    LOGGER.info("   Inertia: %s", real_params.inertia)
+
+    # Apply back to env (redundant but ensures perfect consistency)
     env.apply_rocket_params(config.rocket_params)
 
     # Build curriculum
@@ -618,30 +625,98 @@ def train_controller(
 
     # Resume from checkpoint if specified
     start_episode = 0
+    start_episode = 0
     if resume_from and resume_from.exists():
-        LOGGER.info("📂 Resuming from checkpoint: %s", resume_from)
+        LOGGER.info("Resuming from checkpoint: %s", resume_from)
         try:
             with open(resume_from, "rb") as f:
-                params = serialization.from_bytes(params, f.read())
+                checkpoint_data = f.read()
+            
+            # 1. Try to load as full training state (New Format)
+            # Create a target structure for deserialization
+            target_checkpoint = {
+                "params": params,
+                "opt_state": opt_state,
+                "obs_rms": obs_rms,
+                "stage_index": 0,
+                "stage_episode": 0,
+                "total_successes": 0,
+                "update_step": 0,
+                "best_return": -float("inf"),
+            }
+            
+            try:
+                loaded_checkpoint = serialization.from_bytes(target_checkpoint, checkpoint_data)
+                
+                # Check if it actually loaded the structure (keys should match)
+                # If it was a legacy file (just params), from_bytes might behave unexpectedly 
+                # but usually decoding a raw params msgpack into a dict structure will fail or return garbage.
+                # We assume if it succeeds and has the keys, it's good.
+                
+                params = loaded_checkpoint["params"]
+                opt_state = loaded_checkpoint["opt_state"]
+                obs_rms = loaded_checkpoint["obs_rms"]
+                
+                # Metadata
+                current_stage_index = loaded_checkpoint["stage_index"]
+                current_stage_episode = loaded_checkpoint["stage_episode"]
+                current_total_successes = loaded_checkpoint["total_successes"]
+                current_update_step = loaded_checkpoint["update_step"]
+                current_best_return = loaded_checkpoint["best_return"]
+                
+                LOGGER.info("Loaded FULL training state (Stage %d, Step %d)", 
+                           current_stage_index, current_update_step)
+
+            except Exception as e_full:
+                LOGGER.debug("Could not load as full state (%s), trying legacy...", e_full)
+                # 2. Fallback: Load as legacy params-only (Old Format)
+                params = serialization.from_bytes(params, checkpoint_data)
+                
+                # Reset other components since we don't have them
+                current_stage_index = 0
+                current_stage_episode = 0
+                current_total_successes = 0
+                current_update_step = 0
+                current_best_return = -float("inf")
+                
+                LOGGER.warning("Loaded legacy checkpoint (Params only). Optimizer and ObsRMS were reset.")
+                
             # Try to load training history if available
             history_path = resume_from.parent.parent / "training_history.json"
             if history_path.exists():
                 with open(history_path, "r") as f:
                     history = json.load(f)
                 start_episode = len(history)
-                LOGGER.info("📊 Loaded history: %d episodes completed", start_episode)
+                LOGGER.info("Loaded history: %d episodes completed", start_episode)
+                
         except Exception as e:
-            LOGGER.warning("⚠️ Could not resume from checkpoint: %s", e)
+            LOGGER.warning("Could not resume from checkpoint: %s", e)
             LOGGER.info("Starting fresh training...")
+            current_stage_index = 0
+            current_stage_episode = 0
+            current_total_successes = 0
+            current_update_step = 0
+            current_best_return = -float("inf")
+    else:
+        current_stage_index = 0
+        current_stage_episode = 0
+        current_total_successes = 0
+        current_update_step = 0
+        current_best_return = -float("inf")
 
     state = TrainingState(
         params=params,
         opt_state=opt_state,
         rng=rng,
         obs_rms=obs_rms,
+        stage_index=current_stage_index,
+        stage_episode=current_stage_episode,
+        total_successes=current_total_successes,
+        update_step=current_update_step,
+        best_return=current_best_return,
     )
 
-    LOGGER.info("✅ Training initialized | Policy params: %d | Start episode: %d",
+    LOGGER.info("Training initialized | Policy params: %d | Start episode: %d",
                 sum(p.size for p in jax.tree_util.tree_leaves(params)), start_episode)
     sys.stdout.flush()
     sys.stderr.flush()
@@ -653,7 +728,7 @@ def train_controller(
     viewer = None
     if visualize:
         viewer = mujoco.viewer.launch_passive(env.model, env.data)
-        LOGGER.info("🎥 Live visualization enabled - MuJoCo viewer launched")
+        LOGGER.info("Live visualization enabled - MuJoCo viewer launched")
         sys.stdout.flush()
         sys.stderr.flush()
 
@@ -729,19 +804,15 @@ def train_controller(
             improvement_threshold = max(current_fitness * 0.05, 100.0)  # At least 5% or 100 points
             if best_fitness > current_fitness + improvement_threshold:
                 state.params = population[0][1]
-                LOGGER.info("  🧬 Evolution: Adopted best | Fitness: %.2f → %.2f | Pop mean: %.2f",
+                # CRITICAL FIX: Reset optimizer state for new mutant
+                # This prevents "bad momentum" from previous parameters being applied to the mutant
+                state.opt_state = optimizer.init(state.params)
+                LOGGER.info("  Evolution: Adopted best | Fitness: %.2f -> %.2f | Mean: %.2f | Opt Reset",
                            current_fitness, best_fitness, mean_fitness)
-                evolution_metrics["evolution_adopted"] = 1.0
-                evolution_metrics["fitness_improvement"] = best_fitness - current_fitness
-
-                # CRITICAL FIX: DO NOT reset optimizer state!
-                # Resetting destroys Adam's momentum/velocity, causing unstable learning
-                # The optimizer should CONTINUE with accumulated statistics
-                # state.opt_state = optimizer.init(state.params)  # REMOVED - Was destroying learning!
             else:
                 evolution_metrics["evolution_adopted"] = 0.0
                 if episode % 10 == 0:  # Log occasionally when not adopting
-                    LOGGER.info("  🧬 Evolution: Kept current | Best: %.2f | Current: %.2f | Mean: %.2f",
+                    LOGGER.info("  Evolution: Kept current | Best: %.2f | Current: %.2f | Mean: %.2f",
                                best_fitness, current_fitness, mean_fitness)
 
             # Store top elites for next generation
@@ -797,21 +868,28 @@ def train_controller(
             else:
                 rolling_str = f"{rolling_success_rate*100:5.1f}%"
             
+            # Clean tabular log format
+            success_status = "YES" if episode_success else "NO "
+            
+            # Format rolling success with window size indicator
+            rolling_window_current = len(state.recent_successes)
+            if rolling_window_current < state.rolling_window_size:
+                rolling_str = f"{rolling_success_rate*100:5.1f}%"
+            else:
+                rolling_str = f"{rolling_success_rate*100:5.1f}%"
+            
             LOGGER.info(
-                "Ep %3d/%d | Stage: %-20s | %s | Ret: %7.2f | Avg: %7.2f | Best: %7.2f | "
-                "Success: %5.1f%% (rolling: %s) | PosErr: %.3fm | Loss: %6.3f | Time: %.1fs",
+                "Ep %04d/%04d | %-20s | Success: %s | Ret: %7.2f | Best: %7.2f | "
+                "Rate: %5.1f%% | Err: %.3fm | Loss: %6.3f",
                 episode + 1,
                 total_episodes,
                 stage.name,
-                success_indicator,
+                success_status,
                 episode_return,
-                state.moving_avg_return,
                 state.best_return,
-                stage_success_rate * 100,
-                rolling_str,
+                rolling_success_rate * 100,
                 rollout_stats.get("final_position_error", 0.0),
                 update_metrics["loss"],
-                episode_time,
             )
             # Force flush for Kaggle/Jupyter environments
             import sys
@@ -824,15 +902,32 @@ def train_controller(
             checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
             checkpoint_path = checkpoint_dir / f"policy_ep{episode+1:04d}.msgpack"
+            
+            # Save full training state
+            checkpoint_data = {
+                "params": state.params,
+                "opt_state": state.opt_state,
+                "obs_rms": state.obs_rms,
+                "stage_index": state.stage_index,
+                "stage_episode": state.stage_episode,
+                "total_successes": state.total_successes,
+                "update_step": state.update_step,
+                "best_return": state.best_return,
+            }
+            
             with open(checkpoint_path, "wb") as f:
-                f.write(serialization.to_bytes(state.params))
-            LOGGER.info("💾 Checkpoint saved: %s", checkpoint_path)
+                f.write(serialization.to_bytes(checkpoint_data))
+            with open(checkpoint_path, "wb") as f:
+                f.write(serialization.to_bytes(checkpoint_data))
+            LOGGER.info("Checkpoint saved: %s", checkpoint_path)
 
             if episode_return >= state.best_return:
                 best_path = output_dir / "policy_best.msgpack"
                 with open(best_path, "wb") as f:
-                    f.write(serialization.to_bytes(state.params))
-                LOGGER.info("🏆 New best policy saved: %s (return: %.2f)", best_path, episode_return)
+                    f.write(serialization.to_bytes(checkpoint_data))
+                with open(best_path, "wb") as f:
+                    f.write(serialization.to_bytes(checkpoint_data))
+                LOGGER.info("New best policy saved: %s (return: %.2f)", best_path, episode_return)
 
         state.stage_episode += 1
 
@@ -850,12 +945,12 @@ def train_controller(
 
         if can_progress:
             LOGGER.info("=" * 80)
-            LOGGER.info("📈 STAGE COMPLETE: %s | Success Rate: %.1f%% (%d/%d)",
+            LOGGER.info("STAGE COMPLETE: %s | Success Rate: %.1f%% (%d/%d)",
                        stage.name, stage_success_rate * 100,
                        state.stage_successes, state.stage_attempts)
             if rolling_success_rate >= 0.8 and state.stage_episode < stage.episodes:
-                LOGGER.info("🚀 EARLY PROGRESSION: Achieved 80%% rolling success rate!")
-            LOGGER.info("📈 STAGE PROGRESSION: %s → %s",
+                LOGGER.info("EARLY PROGRESSION: Achieved 80% rolling success rate!")
+            LOGGER.info("STAGE PROGRESSION: %s -> %s",
                        stage.name, curriculum[state.stage_index + 1].name)
             LOGGER.info("=" * 80)
             state.stage_index += 1
@@ -870,28 +965,45 @@ def train_controller(
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # Save policy
+        # Save policy (Full State)
         policy_path = output_dir / "policy_final.msgpack"
+        
+        final_checkpoint_data = {
+            "params": state.params,
+            "opt_state": state.opt_state,
+            "obs_rms": state.obs_rms,
+            "stage_index": state.stage_index,
+            "stage_episode": state.stage_episode,
+            "total_successes": state.total_successes,
+            "update_step": state.update_step,
+            "best_return": state.best_return,
+        }
+        
         with open(policy_path, "wb") as f:
-            f.write(serialization.to_bytes(state.params))
-        LOGGER.info("💾 Saved policy: %s", policy_path)
+            f.write(serialization.to_bytes(final_checkpoint_data))
+        with open(policy_path, "wb") as f:
+            f.write(serialization.to_bytes(final_checkpoint_data))
+        LOGGER.info("Saved policy: %s", policy_path)
 
         # Save history
         history_path = output_dir / "training_history.json"
         with open(history_path, "w") as f:
             json.dump(state.history, f, indent=2)
-        LOGGER.info("💾 Saved history: %s", history_path)
+        with open(history_path, "w") as f:
+            json.dump(state.history, f, indent=2)
+        LOGGER.info("Saved history: %s", history_path)
 
         # Generate plots
         try:
             _generate_plots(state.history, output_dir)
-            LOGGER.info("📊 Generated training plots")
+            LOGGER.info("Generated training plots")
         except Exception as e:
             LOGGER.warning("Could not generate plots: %s", e)
 
     total_time = time.time() - start_time
     final_success_rate = state.total_successes / max(total_episodes, 1)
     LOGGER.info("=" * 80)
-    LOGGER.info("🎉 TRAINING COMPLETE")
+    LOGGER.info("TRAINING COMPLETE")
     LOGGER.info("Total time: %.1f min | Best return: %.2f | Final avg: %.2f",
                 total_time / 60, state.best_return, state.moving_avg_return)
     LOGGER.info("Overall Success Rate: %.1f%% (%d/%d successful episodes)",

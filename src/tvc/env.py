@@ -68,11 +68,13 @@ class TvcEnv:
         self._last_action = np.zeros(3, dtype=np.float64)
         self._prev_action = np.zeros(3, dtype=np.float64)
         
-        # Action smoothing to prevent jittery gimbal control
-        # Exponential moving average filter: smoothed = alpha * new + (1-alpha) * old
+        # Enhanced Action Smoothing (Low-pass filter)
+        # alpha=0.15 heavily smooths the control signal, filtering out high-frequency
+        # jitter from the stochastic policy. This prevents the "shaking" seen in early training.
+        # Real actuators behave like low-pass filters anyway.
         self._smoothed_action = np.zeros(3, dtype=np.float64)
-        self._action_smoothing_alpha = 0.4  # 0.4 = moderate smoothing (lower = more smoothing)
-
+        self._action_smoothing_alpha = 0.15
+        
         # Actuator delay buffer (for realistic hardware simulation)
         self._actuator_delay_steps = actuator_delay_steps
         self._action_buffer = [np.zeros(3, dtype=np.float64) for _ in range(max(1, actuator_delay_steps + 1))]
@@ -166,27 +168,32 @@ class TvcEnv:
         
         # Domain randomization: Randomize physics parameters for robustness
         if enable_randomization:
-            # Mass variation: ±10%
-            mass_factor = self._rng.uniform(0.9, 1.1)
+            # Mass variation: ±20% (Increased from 10% for fuel usage simulation)
+            mass_factor = self._rng.uniform(0.8, 1.2)
             vehicle_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "vehicle")
             if vehicle_id >= 0:
                 self.model.body_mass[vehicle_id] = self._base_mass * mass_factor
 
-            # Inertia variation: ±15%
-            inertia_factor = self._rng.uniform(0.85, 1.15, 3)
+            # Inertia variation: ±20%
+            inertia_factor = self._rng.uniform(0.8, 1.2, 3)
             if vehicle_id >= 0:
                 self.model.body_inertia[vehicle_id] = self._base_inertia * inertia_factor
+                
+            # CRITICAL: Center of Mass (CoM) offset optimization
+            # Real rockets have shifting CoM. Add random offset ±5cm
+            com_offset = self._rng.uniform(-0.05, 0.05, 3)
+            self.model.body_ipos[vehicle_id] = com_offset
 
-            # Thrust variation: ±5%
-            thrust_factor = self._rng.uniform(0.95, 1.05)
+            # Thrust variation: -10% to +5% (Engines degrade more than they over-perform)
+            thrust_factor = self._rng.uniform(0.90, 1.05)
             # Note: Thrust variation applied in step() via scaling
 
-            # Damping variation: ±30%
-            damping_factor = self._rng.uniform(0.7, 1.3)
+            # Damping variation: ±40% (Aerodynamics are hard to model)
+            damping_factor = self._rng.uniform(0.6, 1.4)
             # Applied during dynamics
 
-            # Wind disturbance: 0-5 m/s random direction
-            self._wind_force = self._rng.normal(0.0, 2.0, 3)  # Random wind
+            # Wind disturbance: 0-8 m/s random direction (Gusts)
+            self._wind_force = self._rng.normal(0.0, 3.0, 3)  # Random wind
         else:
             self._wind_force = np.zeros(3)
 
@@ -195,13 +202,13 @@ class TvcEnv:
         initial_quat = np.array(self._stage_config["initial_orientation"], dtype=np.float64)
         initial_omega = np.array(self._stage_config["initial_angular_velocity"], dtype=np.float64)
 
-        # Add realistic sensor noise (GPS: ±2cm, IMU: ±0.01 m/s, gyro: ±0.02 rad/s)
-        # Increase noise variation for domain randomization
-        noise_scale = self._rng.uniform(0.5, 1.5) if self._domain_randomization else 1.0
-        pos_noise = self._rng.normal(0.0, 0.02 * noise_scale, 3)  # ±2cm GPS accuracy
-        vel_noise = self._rng.normal(0.0, 0.01 * noise_scale, 3)  # ±1cm/s IMU accuracy
-        quat_noise = self._rng.normal(0.0, 0.01 * noise_scale, 4)  # ±0.01 orientation noise
-        omega_noise = self._rng.normal(0.0, 0.02 * noise_scale, 3)  # ±0.02 rad/s gyro accuracy
+        # Add realistic sensor noise (GPS: ±5cm, IMU: ±0.02 m/s, gyro: ±0.03 rad/s)
+        # Increased for robust control
+        noise_scale = self._rng.uniform(0.8, 2.0) if self._domain_randomization else 1.0
+        pos_noise = self._rng.normal(0.0, 0.05 * noise_scale, 3)  # ±5cm GPS accuracy
+        vel_noise = self._rng.normal(0.0, 0.02 * noise_scale, 3)  # ±2cm/s IMU accuracy
+        quat_noise = self._rng.normal(0.0, 0.02 * noise_scale, 4)  # ±0.02 orientation noise
+        omega_noise = self._rng.normal(0.0, 0.03 * noise_scale, 3)  # ±0.03 rad/s gyro accuracy
 
         quat = initial_quat + quat_noise
         quat = quat / np.linalg.norm(quat)
@@ -241,12 +248,12 @@ class TvcEnv:
 
         # Action smoothing for position commands
         # Helps filter high-frequency noise while maintaining responsiveness
-        # CRITICAL: alpha=0.7 provides fast response needed for learning
-        # Lower values (0.5, 0.3) create delayed consequences that break learning!
-        alpha = 0.7  # 70% new action, 30% old - optimal for learning
+        # CRITICAL: alpha=0.4 provides smoother control (reduced from 0.7)
+        # to filter out high-frequency jitter from the stochastic policy.
+        alpha = 0.4  # Slower, smoother response
         self._smoothed_action[0] = alpha * action[0] + (1.0 - alpha) * self._smoothed_action[0]  # gimbal_x
         self._smoothed_action[1] = alpha * action[1] + (1.0 - alpha) * self._smoothed_action[1]  # gimbal_y
-        self._smoothed_action[2] = 0.7 * action[2] + 0.3 * self._smoothed_action[2]  # thrust
+        self._smoothed_action[2] = 0.5 * action[2] + 0.5 * self._smoothed_action[2]  # thrust (smoother)
         
         smoothed_action = self._smoothed_action.copy()
 
@@ -404,9 +411,9 @@ class TvcEnv:
         altitude_error = abs(pos[2] - target_altitude)
         altitude_reward = 5.0 / (1.0 + altitude_error)
 
-        # Smoothness: MINIMAL weight - aggressive maneuvers are often necessary for stability!
-        # Reduced from 0.5 to 0.2 to prioritize stability over smoothness
-        smoothness_reward = 0.2 / (1.0 + control_jerk)
+        # Smoothness: INCREASED weight to penalize shaking
+        # Was 0.2, now 2.0 to essentially force smooth control
+        smoothness_reward = 2.0 / (1.0 + control_jerk * 5.0)
 
         # Removed progress reward - uses mutable state that doesn't work properly
         # The position reward already provides progress signal
@@ -461,6 +468,11 @@ class TvcEnv:
             fuel_reward +          # 0
             thrust_guidance_reward  # ~5-10 with bonuses
         )
+
+        # Direct penalty for jerk (rapid action changes)
+        # If action changes by > 10% in one step (0.1), jerk is ~0.1
+        # Penalty: 0.1 * 10.0 = 1.0 (Meaningful penalty)
+        reward -= control_jerk * 10.0
 
         # CRITICAL: Success bonus - large reward for achieving goal state
         # This provides strong learning signal for successful behavior

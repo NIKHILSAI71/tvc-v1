@@ -55,15 +55,44 @@ class EvaluationResults:
 def load_policy(
     policy_path: Path,
     policy_config: PolicyConfig = PolicyConfig(),
-) -> tuple[Any, PolicyFunctions]:
-    """Load trained policy from file."""
+) -> tuple[Any, PolicyFunctions, RunningNormalizer | None]:
+    """Load trained policy and optional normalizer from file."""
     policy_funcs = build_policy_network(policy_config)
 
     with open(policy_path, "rb") as f:
-        params = serialization.from_bytes(None, f.read())
+        data = f.read()
+
+    # Try to decode as generic dict
+    obs_rms = None
+    try:
+        loaded = serialization.from_bytes(None, data)
+        
+        # Check for new checkpoint format (contains "params", "opt_state", "obs_rms")
+        if isinstance(loaded, dict) and "params" in loaded and "obs_rms" in loaded:
+            params = loaded["params"]
+            
+            # Reconstruct RunningNormalizer from loaded dict
+            # Flax deserializes dataclasses as dicts when target is None
+            rms_dict = loaded["obs_rms"]
+            if rms_dict:
+                obs_rms = RunningNormalizer(
+                    count=rms_dict.get("count", 0.0),
+                    mean=jnp.array(rms_dict.get("mean", [])),
+                    m2=jnp.array(rms_dict.get("m2", []))
+                )
+            
+            LOGGER.info("✅ Loaded NEW policy format (includes ObsRMS)")
+        else:
+            # Legacy format or params-only dict
+            params = loaded
+            LOGGER.info("⚠️ Loaded LEGACY policy format (No ObsRMS)")
+
+    except Exception as e:
+        LOGGER.warning("Error loading policy: %s", e)
+        raise
 
     LOGGER.info("Loaded policy from %s", policy_path)
-    return params, policy_funcs
+    return params, policy_funcs, obs_rms
 
 
 def evaluate_policy(
@@ -257,15 +286,20 @@ def evaluate_across_curriculum(
     LOGGER.info("=" * 80)
 
     # Load policy
-    params, policy_funcs = load_policy(policy_path, policy_config)
+    params, policy_funcs, loaded_obs_rms = load_policy(policy_path, policy_config)
 
     # Create environment
     env = TvcEnv(dt=0.02, ctrl_limit=0.3, max_steps=2000, seed=seed)
     env.apply_rocket_params(rocket_params)
 
-    # Initialize normalizer (use identity if not saved)
-    sample_obs = env.reset()
-    obs_rms = RunningNormalizer.initialise(sample_obs)
+    # Initialize normalizer
+    if loaded_obs_rms is not None:
+        obs_rms = loaded_obs_rms
+        LOGGER.info("✅ Using TRAINED observation normalizer from checkpoint")
+    else:
+        sample_obs = env.reset()
+        obs_rms = RunningNormalizer.initialise(sample_obs)
+        LOGGER.warning("⚠️ Using FRESH observation normalizer (Policy might fail due to input scaling mismatch)")
 
     # Build curriculum
     curriculum = build_curriculum()

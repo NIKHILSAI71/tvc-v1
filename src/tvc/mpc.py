@@ -15,23 +15,23 @@ from .dynamics import RocketParams, simulate_rollout
 @dataclass(frozen=True)
 class MpcConfig:
     """Configuration for 3D MPC optimization."""
-    horizon: int = 12
+    horizon: int = 20  # Increased from 12 (0.48s) to 20 (0.8s) for better foresight
     dt: float = 0.04
-    iterations: int = 30  # Reduced from 40 to prevent oscillations (was causing instability)
-    learning_rate: float = 0.03  # Reduced from 0.05 for smoother convergence (less aggressive)
-    gimbal_limit: float = 0.14  # Must match env ctrl_limit and XML (±8° real F9 spec)
+    iterations: int = 30
+    learning_rate: float = 0.03
+    gimbal_limit: float = 0.14
     thrust_min: float = 0.2
     thrust_max: float = 1.0
     tolerance: float = 1e-4
     grad_clip: float | None = 2.0
-    position_weight: float = 20.0  # Reduced from 30.0 (was too aggressive, causing overcorrection)
-    velocity_weight: float = 10.0  # Reduced from 12.0 for gentler velocity control
-    orientation_weight: float = 35.0  # Reduced from 50.0 (was causing tilt overcorrection)
+    position_weight: float = 20.0
+    velocity_weight: float = 10.0
+    orientation_weight: float = 40.0  # Increased from 35.0 for lock-in alignment
     angular_velocity_weight: float = 8.0
-    control_weight: float = 2.0  # Reduced from 3.0 to allow more control authority
-    control_smoothness_weight: float = 4.0  # Reduced from 5.0 for more responsive control
-    thrust_efficiency_weight: float = 0.5  # Reduced from 1.0 (hover needs sustained thrust)
-    terminal_weight: float = 12.0  # Increased from 8.0 for stronger goal convergence
+    control_weight: float = 2.0
+    control_smoothness_weight: float = 5.0  # Increased from 4.0 to reduce actuator jitter
+    thrust_efficiency_weight: float = 0.5
+    terminal_weight: float = 15.0  # Increased from 12.0 for precise landing
 
 
 def _quaternion_distance(q1: jnp.ndarray, q2: jnp.ndarray) -> jnp.ndarray:
