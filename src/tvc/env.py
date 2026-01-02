@@ -383,14 +383,15 @@ class TvcEnv:
             target_quat=target_quat_jnp
         )
         
-        # CRITICAL: Add previous action for temporal awareness
-        # This helps the policy understand action-effect relationships
+        # CRITICAL: Add previous action AND smoothed action for full temporal/state awareness
+        # This helps the policy understand action-effect relationships and the current filter state
         obs_with_action = np.concatenate([
             np.asarray(observation, dtype=np.float32),
-            self._last_action.astype(np.float32),  # Previous action (3)
+            self._last_action.astype(np.float32),      # Predicated/Commanded action (3)
+            self._smoothed_action.astype(np.float32),  # Actual physical action state (3)
         ])
         
-        return obs_with_action  # Total: 38 + 3 = 41 dimensions
+        return obs_with_action  # Total: 38 + 3 + 3 = 44 dimensions
 
     def _compute_reward(self, action: np.ndarray) -> float:
         """Compute reward with proper scaling for realistic rocket control.
@@ -544,22 +545,6 @@ class TvcEnv:
         # Failure gives negative return
         return float(reward)
 
-    def _normalise_reward(self, value: float) -> tuple[float, float]:
-        """Welford's online algorithm for reward normalization."""
-        self._reward_count += 1.0
-        delta = value - self._reward_mean
-        self._reward_mean += delta / self._reward_count
-        self._reward_m2 += delta * (value - self._reward_mean)
-
-        if self._reward_count < self._reward_norm_warmup:
-            return value, 0.0
-
-        variance = self._reward_m2 / max(self._reward_count - 1.0, 1.0)
-        variance = max(float(variance), 1e-6)
-        std = float(math.sqrt(variance))
-        normalised = (value - self._reward_mean) / std
-        normalised = float(np.clip(normalised, -self._reward_norm_clip, self._reward_norm_clip))
-        return normalised, std
 
     def _check_termination(self) -> bool:
         """Check episode termination with early success bonus."""

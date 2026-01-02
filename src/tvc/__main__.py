@@ -230,7 +230,7 @@ def main() -> int:
     train_parser.add_argument("--num-epochs", type=int, default=4, help="PPO epochs per update")
     train_parser.add_argument("--minibatch-size", type=int, default=256, help="PPO minibatch size (optimized)")
     train_parser.add_argument("--resume-from", type=str, default=None, help="Resume from checkpoint (e.g., checkpoints/policy_ep0100.msgpack)")
-    train_parser.add_argument("--visualize", action="store_true", help="Show live visualization of the training process")
+    train_parser.add_argument("--visualize", action="store_true", help="Show live visualization (runs at max speed with 60fps updates)")
     train_parser.add_argument("--use-evolution", action="store_true", help="Enable Neuroevolution population-based training")
 
     # Evaluate command
