@@ -1,4 +1,10 @@
-"""JAX-based 3D rocket dynamics for thrust vector control."""
+"""
+Module: dynamics
+Purpose: JAX-based 3D rocket dynamics for thrust vector control.
+Complexity: Time O(1) per step | Space O(1) auxiliary
+Dependencies: jax, jax.numpy
+Last Updated: 2026-01-03
+"""
 
 from __future__ import annotations
 
@@ -259,6 +265,10 @@ def state_to_observation(
     This provides the policy with goal-directed information essential for
     learning stable control towards a target state.
     
+    Complexity Analysis:
+        Time: O(1) - fixed number of vector operations.
+        Space: O(1) - constant output size (38 dimensions).
+
     State format (17 elements):
     - [0:3] = position
     - [3:6] = velocity
@@ -266,6 +276,9 @@ def state_to_observation(
     - [10:13] = angular velocity
     - [13:15] = gimbal angles [tvc_x, tvc_y] (NEW)
     - [15:17] = gimbal velocities (NEW)
+    
+    Returns:
+        jnp.ndarray: Observation vector of shape (38,).
     """
     pos = state[:3]
     vel = state[3:6]

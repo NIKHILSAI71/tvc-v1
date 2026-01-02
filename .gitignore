@@ -4,7 +4,7 @@ __pycache__/
 .vscode/
 *.pyc
 *.egg-info/
-tests/
+
 .ruff_cache/
 training/
 MUJOCO_LOG.txt

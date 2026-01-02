@@ -1,4 +1,10 @@
-"""Policy networks for 3D TVC control with LSTM support."""
+"""
+Module: policies
+Purpose: Policy networks for 3D TVC control with LSTM support.
+Complexity: Time O(T * H^2) | Space O(T * H) where T=sequence length, H=hidden dim
+Dependencies: flax, jax, jax.numpy
+Last Updated: 2026-01-03
+"""
 
 from __future__ import annotations
 
@@ -63,6 +69,19 @@ class MaskedLSTMCell(nn.Module):
         return new_carry, out
 
 class RecurrentActorCritic(nn.Module):
+    """
+    Recurrent Actor-Critic network with Masked LSTM.
+    
+    Complexity Analysis:
+        Time: O(L * H^2) per sequence forward pass, where L is sequence length and H is hidden dimension.
+        Space: O(L * H) to store hidden states for backpropagation.
+    
+    Design Decisions:
+        - Uses MaskedLSTMCell to correctly handle episode boundaries within a sequence.
+        - Shared encoder for both Actor and Critic heads to learn common features.
+        - Orthogonal initialization (via default Dense) usually preferred for PPO.
+        - LayerNorm used for training stability.
+    """
     config: PolicyConfig
 
     @nn.compact
@@ -166,13 +185,20 @@ def safe_mutate_parameters_smg(
     Weights that strongly affect outputs get smaller mutations.
     This prevents breaking learned temporal dynamics.
     
+    Complexity Analysis:
+        Time: O(P) where P is number of parameters (requires one grad pass).
+        Space: O(P) to store gradients and mutations.
+
     Reference: "Safe Mutations for Deep and Recurrent Neural Networks 
     through Output Gradients" (Lehman et al., 2018)
     """
     
     # Compute output sensitivity for each parameter
+    # sample_obs: [Batch, SeqLen, Features] for sequence input
     def output_fn(params):
-        dones = jnp.zeros((sample_obs.shape[0],))
+        batch_size = sample_obs.shape[0]
+        seq_len = sample_obs.shape[1] if sample_obs.ndim == 3 else 1
+        dones = jnp.zeros((batch_size, seq_len))  # [Batch, SeqLen] for sequence
         mean, _, _, _ = funcs.distribution(params, sample_obs, sample_hidden, dones, deterministic=True)
         return jnp.sum(jnp.square(mean))  # Scalar output for gradient
     

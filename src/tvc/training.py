@@ -1,4 +1,10 @@
-"""Enhanced Recurrent PPO + Evolution training for 3D TVC."""
+"""
+Module: training
+Purpose: Enhanced Recurrent PPO + Evolution training for 3D TVC.
+Complexity: Time O(Epochs * Steps) | Space O(Buffer_Size)
+Dependencies: jax, mujoco, optax
+Last Updated: 2026-01-03
+"""
 
 from __future__ import annotations
 
@@ -53,7 +59,7 @@ class RunningNormalizer:
             delta = obs - self.mean
             self.mean = self.mean + delta / self.count
             delta2 = obs - self.mean
-            self.m2 = self.mean + delta * delta2
+            self.m2 = self.m2 + delta * delta2
         
         variance = np.maximum(self.m2 / max(self.count, 1.0), 1e-4)
         std = np.sqrt(variance)
@@ -69,6 +75,7 @@ class TrainingState:
     opt_state: optax.OptState
     rng: jax.Array
     obs_rms: RunningNormalizer
+    return_rms: RunningNormalizer = field(default_factory=lambda: RunningNormalizer()) # Track returns for normalization
     history: List[Dict[str, Any]] = field(default_factory=list)
     update_step: int = 0
     stage_index: int = 0
@@ -81,7 +88,7 @@ class TrainingState:
     stage_successes: int = 0
     stage_attempts: int = 0
     recent_successes: List[bool] = field(default_factory=list)
-    rolling_window_size: int = 20
+    rolling_window_size: int = 30 # Increased for more stable curriculum transitions
 
     def update_rolling_success(self, success: bool) -> float:
         self.recent_successes.append(success)
@@ -98,6 +105,11 @@ class TrainingConfig:
     learning_rate: float = 5e-4  # Slower for LSTM stability
     clip_epsilon: float = 0.2
     
+    # Environment settings
+    dt: float = 0.02
+    max_episode_steps: int = 300
+    eval_max_steps: int = 500
+    
     # Sequence settings
     rollout_length: int = 3072  # Must be divisible by sequence_length (64*48=3072)
     sequence_length: int = 64  # Time horizon for LSTM backprop
@@ -111,6 +123,19 @@ class TrainingConfig:
     entropy_coef_decay: float = 0.998
     value_coef: float = 0.5
     weight_decay: float = 1e-5
+    
+    # Stability Constants (Refactored from hardcoded values)
+    reward_clip_min: float = -100.0
+    reward_clip_max: float = 100.0
+    advantage_clip_min: float = -100.0
+    advantage_clip_max: float = 100.0
+    log_std_clip_min: float = -4.0
+    log_std_clip_max: float = 2.0
+    log_prob_clip_min: float = -100.0
+    log_prob_clip_max: float = 100.0
+    ratio_clip_limit: float = 10.0
+    return_clip_limit: float = 1e4
+    norm_return_clip: float = 10.0
 
     use_evolution: bool = True  
     population_size: int = 16
@@ -129,7 +154,7 @@ class TrainingConfig:
 def _compute_gae(rewards, values, dones, gamma, lam):
     """Compute GAE with numerical stability."""
     # Clip rewards to prevent extreme advantage values (research-based fix)
-    rewards = jnp.clip(rewards, -100.0, 100.0)
+    rewards = jnp.clip(rewards, config.reward_clip_min, config.reward_clip_max)
     
     def scan_fn(carry, inputs):
         reward, value, done = inputs
@@ -137,7 +162,8 @@ def _compute_gae(rewards, values, dones, gamma, lam):
         delta = reward + gamma * next_value * (1.0 - done) - value
         advantage = delta + gamma * lam * (1.0 - done) * carry
         # Clip advantage during accumulation to prevent explosion
-        advantage = jnp.clip(advantage, -10.0, 10.0)
+        # Increased clip range to allow more gradient signal
+        advantage = jnp.clip(advantage, config.advantage_clip_min, config.advantage_clip_max)
         return advantage, advantage
 
     _, advantages_rev = jax.lax.scan(
@@ -147,7 +173,7 @@ def _compute_gae(rewards, values, dones, gamma, lam):
         reverse=True,
     )
     advantages = advantages_rev[::-1]
-    returns = jnp.clip(advantages + values[:-1], -1e4, 1e4)
+    returns = advantages + values[:-1] # Remove aggressive clipping, handle via normalization
     return advantages, returns
 
 
@@ -165,7 +191,7 @@ def _collect_rollout(
     @jax.jit
     def _gaussian_log_prob(mean, log_std, x):
         # Clip log_std to prevent numerical issues
-        log_std = jnp.clip(log_std, -4.0, 2.0)
+        log_std = jnp.clip(log_std, config.log_std_clip_min, config.log_std_clip_max)
         var = jnp.exp(2 * log_std) + 1e-8  # Add epsilon for stability
         log_prob = -0.5 * jnp.sum(jnp.square(x - mean) / var + 2 * log_std + jnp.log(2 * np.pi), axis=-1)
         return jnp.clip(log_prob, -100.0, 100.0)  # Prevent extreme values
@@ -342,6 +368,12 @@ def _ppo_update(
         config.gamma, config.lam
     )
     
+    # Update return RMS and normalize returns for value function targets
+    # This prevents the value loss from exploding when returns are in the thousands
+    state.return_rms.normalize(np.asarray(returns), update_stats=True)
+    norm_returns = (returns - state.return_rms.mean) / (np.sqrt(state.return_rms.m2 / max(state.return_rms.count, 1.0)) + 1e-8)
+    norm_returns = jnp.clip(norm_returns, -config.norm_return_clip, config.norm_return_clip)
+
     # Normalize advantages
     advantages = (advantages - jnp.mean(advantages)) / (jnp.std(advantages) + 1e-8)
     
@@ -365,7 +397,7 @@ def _ppo_update(
         "actions": to_seq(batch["actions"]),
         "log_probs": to_seq(batch["log_probs"]),
         "advantages": to_seq(advantages),
-        "returns": to_seq(returns),
+        "returns": to_seq(norm_returns), # Use normalized returns!
         "values": to_seq(batch["values"][:-1]),
         "dones": to_seq(batch["dones"]),
         "hidden_h": to_seq(batch["hidden_h"])[:, 0, :], # Take only first hidden state of each sequence!
@@ -391,17 +423,17 @@ def _ppo_update(
         # Calc probabilities with numerical stability
         def log_prob_fn(m, l, a):
             # Clip log_std to prevent numerical issues
-            l = jnp.clip(l, -4.0, 2.0)
+            l = jnp.clip(l, config.log_std_clip_min, config.log_std_clip_max)
             var = jnp.exp(2 * l) + 1e-8  # Add epsilon for stability
             log_prob = -0.5 * jnp.sum(jnp.square(a - m) / var + 2 * l + jnp.log(2 * np.pi), axis=-1)
-            return jnp.clip(log_prob, -100.0, 100.0)  # Prevent extreme values
+            return jnp.clip(log_prob, config.log_prob_clip_min, config.log_prob_clip_max)  # Prevent extreme values
             
         new_log_probs = log_prob_fn(mean, log_std, minibatch["actions"])
-        old_log_probs = jnp.clip(minibatch["log_probs"], -100.0, 100.0)
+        old_log_probs = jnp.clip(minibatch["log_probs"], config.log_prob_clip_min, config.log_prob_clip_max)
         
         # Standard PPO logic with clipped ratio for stability
         log_ratio = new_log_probs - old_log_probs
-        log_ratio = jnp.clip(log_ratio, -10.0, 10.0)  # Prevent exp explosion
+        log_ratio = jnp.clip(log_ratio, -config.ratio_clip_limit, config.ratio_clip_limit)  # Prevent exp explosion
         ratio = jnp.exp(log_ratio)
         clipped_ratio = jnp.clip(ratio, 1.0 - config.clip_epsilon, 1.0 + config.clip_epsilon)
         
@@ -415,14 +447,14 @@ def _ppo_update(
         
         # Clipped value function loss (PPO best practice for stability)
         old_values = minibatch["values"]
-        returns = jnp.clip(minibatch["returns"], -1e4, 1e4)  # Clip extreme returns
+        returns = jnp.clip(minibatch["returns"], -config.return_clip_limit, config.return_clip_limit)  # Clip extreme returns
         value_clipped = old_values + jnp.clip(values - old_values, -config.value_clip_epsilon, config.value_clip_epsilon)
         value_loss_unclipped = jnp.square(returns - values)
         value_loss_clipped = jnp.square(returns - value_clipped)
         value_loss = 0.5 * jnp.mean(jnp.maximum(value_loss_unclipped, value_loss_clipped))
         
         # Entropy with stability
-        log_std_clipped = jnp.clip(log_std, -4.0, 2.0)
+        log_std_clipped = jnp.clip(log_std, config.log_std_clip_min, config.log_std_clip_max)
         entropy = jnp.mean(jnp.sum(log_std_clipped + 0.5 * jnp.log(2.0 * jnp.pi * jnp.e), axis=-1))
         
         total_loss = actor_loss + config.value_coef * value_loss - current_entropy_coef * entropy
@@ -456,6 +488,7 @@ def _ppo_update(
             
             updates, opt_state = optimizer.update(grads, opt_state, params)
             params = optax.apply_updates(params, updates)
+            state.update_step += 1 # Increment update step!
 
     state.params = params
     state.opt_state = opt_state
@@ -485,7 +518,7 @@ def _evaluate_candidate(env, stage, params, funcs, obs_rms, config, num_episodes
         
         ep_r = 0
         steps = 0
-        while not done and steps < 500:
+        while not done and steps < config.eval_max_steps:
             norm_obs = obs_rms.normalize(obs, update_stats=False)
             
             mean, _, _, hidden = funcs.distribution(
@@ -515,7 +548,7 @@ def train_controller(
     visualize: bool = False,
 ) -> TrainingState:
     """Entry point for training."""
-    env = TvcEnv(dt=0.02, ctrl_limit=0.14, max_steps=300, seed=seed)
+    env = TvcEnv(dt=config.dt, ctrl_limit=config.policy_config.action_limit, max_steps=config.max_episode_steps, seed=seed)
     
     # Sync physics
     real_params = config.rocket_params.from_model(env.model)
@@ -546,7 +579,7 @@ def train_controller(
     )
     opt_state = optimizer.init(params)
     
-    state = TrainingState(params, opt_state, rng, obs_rms)
+    state = TrainingState(params, opt_state, rng, obs_rms, return_rms=RunningNormalizer())
     
     LOGGER.info("Recurrent PPO Training Initialized.")
     
@@ -589,8 +622,34 @@ def train_controller(
         # Update
         state, metrics = _ppo_update(state, batch, optimizer, funcs, config, entropy_coef)
         
+        # Update metrics
+        state.moving_avg_return = (1.0 - state.moving_avg_alpha) * state.moving_avg_return + state.moving_avg_alpha * stats['episode_return']
+        if stats['episode_return'] > state.best_return:
+            state.best_return = float(stats['episode_return'])
+        
+        # Track successes
+        if stats['episode_success']:
+            state.total_successes += 1
+            state.stage_successes += 1
+        state.stage_attempts += 1
+        
+        rolling_sr = state.update_rolling_success(stats['episode_success'])
+        
         if episode % 10 == 0:
-            LOGGER.info(f"Ep {episode} | R: {stats['episode_return']:.1f} | Loss: {metrics['loss']:.4f} | {stats['steps_per_second']:.0f} steps/s")
+            LOGGER.info(f"Ep {episode:4d} | R: {stats['episode_return']:8.1f} | Loss: {metrics['loss']:7.4f} | SR: {rolling_sr*100:4.1f}% | Stage: {state.stage_index}")
+        
+        # Advance Curriculum
+        # If success rate > 80% and we've done at least min_episodes for the stage
+        if rolling_sr >= 0.8 and state.stage_attempts >= stage.min_episodes:
+            if state.stage_index < len(curriculum) - 1:
+                state.stage_index += 1
+                state.stage_attempts = 0 # Reset stage metrics
+                state.stage_successes = 0
+                state.recent_successes = [] # Clear window for new stage
+                LOGGER.info(f"*** Advancing to Stage {state.stage_index}: {curriculum[state.stage_index].name} ***")
+        
+        # Decay entropy
+        entropy_coef *= config.entropy_coef_decay
         
         # ============================================================
         # EVOLUTION: Safe Mutation through Gradients (SM-G) for LSTM
@@ -637,5 +696,16 @@ def train_controller(
             if best_params is not state.params:
                 state.params = best_params
                 LOGGER.info(f"  Evolution: Accepted mutant with R: {best_fitness:.1f}")
+                
+                # CRITICAL FIX: Reset optimizer state when params change discontinuously!
+                # breakdown:
+                # 1. The new params are a "jump" in the landscape.
+                # 2. Old momentum (mu, nu) from Adam is now invalid/stale.
+                # 3. Applying old momentum to new params causes massive instability.
+                LOGGER.info("  Evolution: Resetting optimizer state to match new parameters.")
+                state.opt_state = optimizer.init(state.params)
         
     return state
+
+
+
