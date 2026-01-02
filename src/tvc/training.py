@@ -21,7 +21,9 @@ from jax import Array
 from .curriculum import CurriculumStage, build_curriculum
 from .dynamics import RocketParams
 from .env import TvcEnv
-from .mpc import MpcConfig
+from .curriculum import CurriculumStage, build_curriculum
+from .dynamics import RocketParams
+from .env import TvcEnv
 from .policies import PolicyConfig, PolicyFunctions, build_policy_network, mutate_parameters
 
 LOGGER = logging.getLogger(__name__)
@@ -143,7 +145,8 @@ class TrainingConfig:
 
     # Configuration objects
     policy_config: PolicyConfig = PolicyConfig()
-    mpc_config: MpcConfig = MpcConfig()
+    # Configuration objects
+    policy_config: PolicyConfig = PolicyConfig()
     rocket_params: RocketParams = RocketParams()
 
 
@@ -259,11 +262,15 @@ def _collect_rollout(
             orient_alignment = float(np.abs(np.dot(quat, target_quat)))
             angular_vel_mag = float(np.linalg.norm(omega))
 
+            # Calculate required alignment from stage tolerance (radians)
+            # alignment = cos(theta/2)
+            required_alignment = math.cos(stage.orientation_tolerance / 2.0)
+            
             # Evaluate success at episode end - MUST be stable and upright
             episode_success = (
                 pos_error < stage.position_tolerance and
                 vel_error < stage.velocity_tolerance and
-                orient_alignment > 0.98 and  # Stricter: within ~11 degrees
+                orient_alignment > required_alignment and  # Use stage-specific tolerance
                 angular_vel_mag < stage.angular_velocity_tolerance  # Must not be spinning
             )
 
@@ -292,10 +299,11 @@ def _collect_rollout(
         vel_error = float(np.linalg.norm(vel - target_vel))
         orient_alignment = float(np.abs(np.dot(quat, target_quat)))
 
+        required_alignment = math.cos(stage.orientation_tolerance / 2.0)
         episode_success = (
             pos_error < stage.position_tolerance and
             vel_error < stage.velocity_tolerance and
-            orient_alignment > 0.95
+            orient_alignment > required_alignment
         )
 
         episode_successes.append(episode_success)
