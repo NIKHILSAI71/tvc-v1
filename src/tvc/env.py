@@ -521,23 +521,23 @@ class TvcEnv:
         # CRITICAL: Strong penalties for failure states to teach avoidance
         vertical_velocity = vel[2]  # Negative = descending
         
-        # Crash penalty - severe
+        # Crash penalty - scaled down for stability (research: high variance hurts value learning)
         if pos[2] < 0.05:  # Below ground
-            reward -= 200.0  # Very severe penalty (increased from 100.0)
+            reward -= 50.0  # Reduced from 200.0 for lower variance
         elif pos[2] < 0.2 and vertical_velocity < -2.0:  # Low + fast descent = imminent crash
-            reward -= 100.0  # Severe penalty (increased from 50.0)
+            reward -= 25.0  # Reduced from 100.0
         
         # Excessive tilt penalty - moderate (allow some tilt for maneuvering)
         if orient_alignment < 0.866:  # > 30 degrees tilt
-            reward -= 50.0  # Increased from 30.0
+            reward -= 20.0  # Reduced from 50.0
         elif orient_alignment < 0.94:  # > 20 degrees tilt
-            reward -= 10.0  # Gentle warning penalty
+            reward -= 5.0  # Reduced from 10.0
         
         # Spinning penalty
         if omega_magnitude > 1.5:  # Excessive spinning
-            reward -= 40.0  # Increased from 20.0
+            reward -= 15.0  # Reduced from 40.0
         elif omega_magnitude > 1.0:  # High angular velocity
-            reward -= 15.0  # Gentle warning
+            reward -= 5.0  # Reduced from 15.0
 
         # Reward scale check: Typical good behavior should get 40-60 per step
         # Over 300 steps, this gives ~12k-18k return

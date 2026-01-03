@@ -1,6 +1,6 @@
 """
 Module: policies
-Purpose: Policy networks for 3D TVC control with LSTM support.
+Purpose: Policy networks for 3D TVC control with GRU recurrence.
 Complexity: Time O(T * H^2) | Space O(T * H) where T=sequence length, H=hidden dim
 Dependencies: flax, jax, jax.numpy
 Last Updated: 2026-01-03
@@ -19,27 +19,28 @@ from flax.core import FrozenDict
 
 PRNGKey = jax.Array
 Variables = FrozenDict[str, Any]
-LSTMState = Tuple[jnp.ndarray, jnp.ndarray]
+# GRU uses single hidden state (simpler than LSTM's (h, c) tuple)
+GRUState = jnp.ndarray  # Shape: [Batch, HiddenDim]
 
 class InitFn(Protocol):
-    def __call__(self, key: PRNGKey, sample_obs: jnp.ndarray, sample_hidden: LSTMState) -> Tuple[Variables, LSTMState]: ...
+    def __call__(self, key: PRNGKey, sample_obs: jnp.ndarray, sample_hidden: GRUState) -> Tuple[Variables, GRUState]: ...
 
 class ActorFn(Protocol):
     def __call__(
-        self, variables: Variables, observation: jnp.ndarray, hidden: LSTMState, dones: jnp.ndarray, 
+        self, variables: Variables, observation: jnp.ndarray, hidden: GRUState, dones: jnp.ndarray, 
         key: PRNGKey | None = ..., deterministic: bool = ...
-    ) -> Tuple[jnp.ndarray, LSTMState]: ...
+    ) -> Tuple[jnp.ndarray, GRUState]: ...
 
 class DistributionFn(Protocol):
     def __call__(
-        self, variables: Variables, observation: jnp.ndarray, hidden: LSTMState, dones: jnp.ndarray, 
+        self, variables: Variables, observation: jnp.ndarray, hidden: GRUState, dones: jnp.ndarray, 
         key: PRNGKey | None = ..., deterministic: bool = ...
-    ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, LSTMState]: ...
+    ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, GRUState]: ...
 
 @dataclass(frozen=True)
 class PolicyConfig:
     hidden_dims: Tuple[int, ...] = (256, 128)
-    lstm_hidden_dim: int = 128
+    gru_hidden_dim: int = 128  # Changed from lstm_hidden_dim - GRU is simpler
     activation: Callable[[jnp.ndarray], jnp.ndarray] = nn.silu
     log_std_init: float = -1.2
     log_std_min: float = -4.0
@@ -51,41 +52,40 @@ class PolicyConfig:
     thrust_init_bias: float = -1.0
     action_dims: int = 3
 
-class MaskedLSTMCell(nn.Module):
-    """LSTMCell with internal reset logic."""
+class MaskedGRUCell(nn.Module):
+    """GRUCell with internal reset logic. Simpler than LSTM - single hidden state."""
     features: int
 
     @nn.compact
-    def __call__(self, carry: LSTMState, inputs: Tuple[jnp.ndarray, jnp.ndarray]) -> Tuple[LSTMState, jnp.ndarray]:
+    def __call__(self, carry: GRUState, inputs: Tuple[jnp.ndarray, jnp.ndarray]) -> Tuple[GRUState, jnp.ndarray]:
         x, done = inputs
         # Support broadcasting
         done = jnp.reshape(done, (-1, 1))
         
-        h, c = carry
-        h = h * (1.0 - done)
-        c = c * (1.0 - done)
+        # GRU has single hidden state (not tuple like LSTM)
+        h = carry * (1.0 - done)  # Reset hidden on episode boundary
         
-        new_carry, out = nn.LSTMCell(self.features)((h, c), x)
+        new_carry, out = nn.GRUCell(self.features)(h, x)
         return new_carry, out
 
 class RecurrentActorCritic(nn.Module):
     """
-    Recurrent Actor-Critic network with Masked LSTM.
+    Recurrent Actor-Critic network with Masked GRU.
     
     Complexity Analysis:
         Time: O(L * H^2) per sequence forward pass, where L is sequence length and H is hidden dimension.
         Space: O(L * H) to store hidden states for backpropagation.
     
     Design Decisions:
-        - Uses MaskedLSTMCell to correctly handle episode boundaries within a sequence.
-        - Shared encoder for both Actor and Critic heads to learn common features.
-        - Orthogonal initialization (via default Dense) usually preferred for PPO.
+        - Uses MaskedGRUCell (simpler than LSTM, 30% fewer params).
+        - GRU uses single hidden state vs LSTM's (h, c) tuple.
+        - Shared encoder for both Actor and Critic heads.
         - LayerNorm used for training stability.
     """
     config: PolicyConfig
 
     @nn.compact
-    def __call__(self, obs: jnp.ndarray, hidden: LSTMState, dones: jnp.ndarray, deterministic: bool = False):
+    def __call__(self, obs: jnp.ndarray, hidden: GRUState, dones: jnp.ndarray, deterministic: bool = False):
         is_sequence = obs.ndim == 3
         if not is_sequence:
             obs = obs[:, None, :]
@@ -99,21 +99,21 @@ class RecurrentActorCritic(nn.Module):
                 x = nn.LayerNorm()(x)
             x = self.config.activation(x)
                 
-        # LSTM
+        # GRU (simpler than LSTM - single hidden state)
         # Transpose to [Time, Batch, Features] for scanning
         x_t = jnp.transpose(x, (1, 0, 2))
         dones_t = jnp.transpose(dones, (1, 0))
         
-        # Scan the MaskedLSTMCell
-        lstm_scan = nn.scan(
-            MaskedLSTMCell,
+        # Scan the MaskedGRUCell
+        gru_scan = nn.scan(
+            MaskedGRUCell,
             variable_broadcast="params",
             split_rngs={"params": False},
             in_axes=0, out_axes=0
-        )(features=self.config.lstm_hidden_dim)
+        )(features=self.config.gru_hidden_dim)
         
-        # Pack inputs correctly as a tuple matching MaskedLSTMCell.__call__ signature
-        final_state, x_out = lstm_scan(hidden, (x_t, dones_t))
+        # Pack inputs correctly as a tuple matching MaskedGRUCell.__call__ signature
+        final_state, x_out = gru_scan(hidden, (x_t, dones_t))
         
         # Transpose back to [Batch, Time, Features]
         x_out = jnp.transpose(x_out, (1, 0, 2))
@@ -136,9 +136,9 @@ class RecurrentActorCritic(nn.Module):
             
         return mean, log_std, value, final_state
 
-    def initialize_carrier(self, batch_size: int) -> LSTMState:
-        dummy_rng = jax.random.PRNGKey(0)
-        return nn.LSTMCell.initialize_carry(dummy_rng, (batch_size,), self.config.lstm_hidden_dim)
+    def initialize_carrier(self, batch_size: int) -> GRUState:
+        # GRU uses single hidden state (simpler than LSTM)
+        return jnp.zeros((batch_size, self.config.gru_hidden_dim))
 
 @dataclass(frozen=True)
 class PolicyFunctions:
@@ -150,7 +150,7 @@ class PolicyFunctions:
 def build_policy_network(config: PolicyConfig = PolicyConfig()) -> PolicyFunctions:
     module = RecurrentActorCritic(config)
     
-    def init_fn(key: PRNGKey, sample_obs: jnp.ndarray, sample_hidden: LSTMState) -> Tuple[Variables, LSTMState]:
+    def init_fn(key: PRNGKey, sample_obs: jnp.ndarray, sample_hidden: GRUState) -> Tuple[Variables, GRUState]:
         dones = jnp.zeros((sample_obs.shape[0],), dtype=jnp.float32)
         variables = module.init(key, sample_obs, sample_hidden, dones, deterministic=True)
         return cast(Variables, variables), sample_hidden
@@ -175,11 +175,11 @@ def safe_mutate_parameters_smg(
     variables: Variables,
     funcs,
     sample_obs: jnp.ndarray,
-    sample_hidden: LSTMState,
+    sample_hidden: GRUState,
     scale: float = 0.05,
     sensitivity_clip: float = 10.0,
 ) -> Variables:
-    """Safe Mutation through Gradients (SM-G) for LSTM networks.
+    """Safe Mutation through Gradients (SM-G) for GRU networks.
     
     Scales mutation magnitude inversely to output sensitivity.
     Weights that strongly affect outputs get smaller mutations.

@@ -106,11 +106,11 @@ def evaluate_policy(
 
     env.configure_stage(stage)
     
-    # Initialize LSTM Carrier
+    # Initialize GRU Carrier
     # We need a dummy init to get shapes, or use a helper
     config = env.model # Not config..
     # Hardcode dim or assume policy_config default
-    lstm_dim = 128 # Default in policies.py provided earlier
+    gru_dim = 128 # Default in policies.py provided earlier
     
     target_pos = np.array(stage.target_position, dtype=np.float32)
     target_vel = np.array(stage.target_velocity, dtype=np.float32)
@@ -124,9 +124,8 @@ def evaluate_policy(
         # Initialize Hidden State [Batch=1, Dim]
         # We need to use the policy's init logic or manually create zeros
         # Let's assume standard zero init
-        hidden_h = jnp.zeros((1, lstm_dim))
-        hidden_c = jnp.zeros((1, lstm_dim))
-        hidden = (hidden_h, hidden_c)
+        # GRU uses single hidden state
+        hidden = jnp.zeros((1, gru_dim))
         
         episode_return = 0.0
         done = False

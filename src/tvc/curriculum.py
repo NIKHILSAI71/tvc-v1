@@ -60,7 +60,32 @@ def build_curriculum() -> List[CurriculumStage]:
         min_episodes=50
     )
 
-    # Stage 2: Short Hop Landing
+    # Stage 2: Intermediate Hop (NEW - bridges difficulty gap)
+    # Start at 10m. Gentler transition from 5m to 15m.
+    # Research: Curriculum stages should increase difficulty by 30-50%, not 200%
+    intermediate_hop_stage = CurriculumStage(
+        name="intermediate_hop",
+        episodes=200,
+        target_position=(0.0, 0.0, 1.0),
+        target_orientation=(1.0, 0.0, 0.0, 0.0),
+        target_velocity=(0.0, 0.0, -0.5),
+        target_angular_velocity=(0.0, 0.0, 0.0),
+        
+        initial_position=(0.0, 0.0, 10.0),  # 10m, not 15m (100% increase from 5m)
+        initial_velocity=(0.0, 0.0, -1.5),   # Gentler descent than short_hop
+        initial_orientation=(1.0, 0.0, 0.0, 0.0),
+        initial_angular_velocity=(0.0, 0.0, 0.0),
+        
+        position_tolerance=1.8,  # Slightly more forgiving than short_hop
+        velocity_tolerance=0.9,
+        orientation_tolerance=0.25,
+        angular_velocity_tolerance=0.45,
+        tolerance_bonus=0.55,
+        success_episodes=5,
+        min_episodes=40
+    )
+
+    # Stage 3: Short Hop Landing (was Stage 2)
     # Start at 15m. Must control descent.
     short_hop_stage = CurriculumStage(
         name="short_hop",
@@ -132,7 +157,7 @@ def build_curriculum() -> List[CurriculumStage]:
         min_episodes=100
     )
 
-    return [touchdown_stage, short_hop_stage, high_descent_stage, expert_stage]
+    return [touchdown_stage, intermediate_hop_stage, short_hop_stage, high_descent_stage, expert_stage]
 
 
 def select_stage(curriculum: List[CurriculumStage], episode: int) -> CurriculumStage:
