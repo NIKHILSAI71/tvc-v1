@@ -489,6 +489,79 @@ class TvcEnv:
         
         fuel_reward = 0.0  # Disabled for hover task
 
+        # ============================================================
+        # STAGE-SPECIFIC REWARDS: Hover vs Landing
+        # ============================================================
+        stage_name = self._stage_config.get("stage_name", "")
+        target_altitude = target_pos[2]
+        descent_reward = 0.0
+        hover_precision_reward = 0.0
+        
+        # HOVER STAGE REWARDS (Stage 0: 3m Hover)
+        if "Hover" in stage_name or target_altitude >= 2.5:
+            # Reward for maintaining exact position (not just being close)
+            if pos_error < 0.3:  # Very precise position
+                hover_precision_reward = 10.0
+            elif pos_error < 0.6:
+                hover_precision_reward = 5.0
+            
+            # Extra reward for true zero velocity (hovering, not drifting)
+            if vel_error < 0.2:
+                hover_precision_reward += 8.0
+            elif vel_error < 0.4:
+                hover_precision_reward += 4.0
+        
+        # LANDING STAGE REWARDS (Stages with target altitude <= 1.5m)
+        elif target_altitude <= 1.5:
+            vertical_velocity = vel[2]  # Negative = descending
+            current_altitude = pos[2]
+            
+            # Optimal descent profile: velocity proportional to sqrt of altitude
+            # This is the "constant time-to-impact" profile used by real rockets
+            # At 5m: target_vz = -0.5 * sqrt(5) = -1.12 m/s
+            # At 1m: target_vz = -0.5 * sqrt(1) = -0.5 m/s
+            # At 0.1m: target_vz = -0.5 * sqrt(0.1) = -0.16 m/s
+            target_descent_rate = -0.5 * np.sqrt(max(current_altitude, 0.1))
+            descent_error = abs(vertical_velocity - target_descent_rate)
+            
+            # Reward for following optimal descent profile
+            descent_reward = 10.0 / (1.0 + descent_error * 3.0)
+            
+            # Bonus for very soft touchdown (< 0.3 m/s at low altitude)
+            if current_altitude < 0.5 and abs(vertical_velocity) < 0.3:
+                descent_reward += 20.0  # Large soft landing bonus
+            elif current_altitude < 1.0 and abs(vertical_velocity) < 0.5:
+                descent_reward += 10.0  # Moderate soft approach bonus
+            
+            # Penalize too-fast descent at low altitude (crash risk)
+            if current_altitude < 2.0 and vertical_velocity < -2.0:
+                descent_reward -= 15.0  # Coming in too hot
+
+        # ============================================================
+        # GIMBAL-ORIENTATION COUPLING REWARD
+        # Explicitly reward using gimbal correctly to counteract tilt
+        # This teaches the agent the TVC control mapping!
+        # ============================================================
+        gimbal_angles = self.data.qpos[7:9]  # Current gimbal position [pitch, yaw]
+        
+        # Approximate tilt from quaternion (small angle approximation)
+        # roll ≈ 2*qx (tilt around X axis)
+        # pitch ≈ 2*qy (tilt around Y axis)
+        roll_tilt = 2.0 * quat[1]   # Tilt around X
+        pitch_tilt = 2.0 * quat[2]  # Tilt around Y
+        
+        # Correct gimbal response: gimbal should oppose tilt
+        # If tilting forward (positive pitch), gimbal X should deflect negatively
+        # Scale factor matches the expected gimbal response magnitude
+        correct_gimbal_x = -pitch_tilt * 0.4
+        correct_gimbal_y = roll_tilt * 0.4
+        
+        # Reward for correct gimbal usage (lower error = higher reward)
+        gimbal_x_error = abs(gimbal_angles[0] - correct_gimbal_x)
+        gimbal_y_error = abs(gimbal_angles[1] - correct_gimbal_y)
+        gimbal_agreement = 1.0 / (1.0 + gimbal_x_error + gimbal_y_error)
+        gimbal_control_reward = 8.0 * gimbal_agreement  # Max ~8 when perfect
+
         # Combined reward (dense, shaped, scales ~0-80 per step)
         reward = (
             pos_reward +           # ~15 max
@@ -498,9 +571,12 @@ class TvcEnv:
             altitude_reward +      # ~5 max
             smoothness_reward +    # ~0.2 max
             progress_reward +      # 0
-            stability_reward +     # ~5 max
+            stability_reward +     # ~8 max
             fuel_reward +          # 0
-            thrust_guidance_reward # 0
+            thrust_guidance_reward + # 0
+            descent_reward +       # ~10-30 for landing stages
+            hover_precision_reward + # ~10-18 for hover stage
+            gimbal_control_reward  # ~8 max for correct TVC usage
         )
 
         # Direct penalty for jerk (rapid action changes)

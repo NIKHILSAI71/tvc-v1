@@ -47,10 +47,22 @@ LOGGER = logging.getLogger(__name__)
 
 def cmd_train(args) -> int:
     """Train a new TVC controller model."""
+    from datetime import datetime
     from .dynamics import RocketParams
     from .policies import PolicyConfig
     from .training import TrainingConfig, train_controller
 
+    # Setup output directory
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Add file logging to save terminal output
+    log_filename = output_dir / f"training_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+    file_handler = logging.FileHandler(log_filename, mode='w', encoding='utf-8')
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-8s | %(message)s", datefmt="%H:%M:%S"))
+    logging.getLogger().addHandler(file_handler)
+    
     LOGGER.info("=" * 60)
     LOGGER.info("TVC 3D Training - PPO + Evolution")
     LOGGER.info("-" * 60)
@@ -60,6 +72,7 @@ def cmd_train(args) -> int:
     LOGGER.info("Learning Rate: %.2e", args.learning_rate)
     LOGGER.info("Rollout Length: %d", args.rollout_length)
     LOGGER.info("Output: %s", args.output_dir)
+    LOGGER.info("Log File: %s", log_filename)
     LOGGER.info("Visualization: %s", "Enabled" if args.visualize else "Disabled (use --visualize to enable)")
     LOGGER.info("=" * 60)
 

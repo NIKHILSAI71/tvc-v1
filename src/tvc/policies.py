@@ -39,8 +39,8 @@ class DistributionFn(Protocol):
 
 @dataclass(frozen=True)
 class PolicyConfig:
-    hidden_dims: Tuple[int, ...] = (256, 128)
-    gru_hidden_dim: int = 128  # Changed from lstm_hidden_dim - GRU is simpler
+    hidden_dims: Tuple[int, ...] = (512, 256)  # Larger network for complex behaviors
+    gru_hidden_dim: int = 256  # More temporal memory for smooth control
     activation: Callable[[jnp.ndarray], jnp.ndarray] = nn.silu
     log_std_init: float = -1.2
     log_std_min: float = -4.0

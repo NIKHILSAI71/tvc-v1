@@ -11,9 +11,11 @@ from __future__ import annotations
 import json
 import logging
 import math
+import pickle
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 import copy
@@ -32,6 +34,172 @@ from .env import TvcEnv
 from .policies import PolicyConfig, PolicyFunctions, build_policy_network, mutate_parameters
 
 LOGGER = logging.getLogger(__name__)
+
+# ============================================================
+# CHECKPOINTING: Save and load training state
+# ============================================================
+
+def save_checkpoint(
+    state: "TrainingState",
+    config: "TrainingConfig", 
+    episode: int,
+    output_dir: Path,
+    is_best: bool = False,
+    training_logs: List[Dict] = None,
+) -> Path:
+    """
+    Save training checkpoint with model, optimizer, and logs.
+    
+    Structure:
+        data/checkpoints/
+            YYYYMMDD_HHMMSS_ep{episode}/
+                model_params.pkl
+                optimizer_state.pkl
+                training_state.json
+                config.json
+                training_logs.json
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    checkpoint_name = f"{timestamp}_ep{episode:04d}"
+    if is_best:
+        checkpoint_name += "_best"
+    
+    checkpoint_dir = output_dir / "checkpoints" / checkpoint_name
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Save model parameters (JAX arrays -> numpy -> pickle)
+    params_np = jax.tree_util.tree_map(np.array, state.params)
+    with open(checkpoint_dir / "model_params.pkl", "wb") as f:
+        pickle.dump(params_np, f)
+    
+    # Save optimizer state
+    opt_state_np = jax.tree_util.tree_map(
+        lambda x: np.array(x) if isinstance(x, jnp.ndarray) else x, 
+        state.opt_state
+    )
+    with open(checkpoint_dir / "optimizer_state.pkl", "wb") as f:
+        pickle.dump(opt_state_np, f)
+    
+    # Save training state (non-JAX fields)
+    training_state_dict = {
+        "update_step": state.update_step,
+        "stage_index": state.stage_index,
+        "stage_episode": state.stage_episode,
+        "best_return": float(state.best_return),
+        "moving_avg_return": float(state.moving_avg_return),
+        "total_successes": state.total_successes,
+        "stage_successes": state.stage_successes,
+        "stage_attempts": state.stage_attempts,
+        "recent_successes": state.recent_successes,
+        "obs_rms": {
+            "count": float(state.obs_rms.count),
+            "mean": state.obs_rms.mean.tolist(),
+            "m2": state.obs_rms.m2.tolist(),
+        },
+        "return_rms": {
+            "count": float(state.return_rms.count),
+            "mean": state.return_rms.mean.tolist() if hasattr(state.return_rms.mean, 'tolist') else [],
+            "m2": state.return_rms.m2.tolist() if hasattr(state.return_rms.m2, 'tolist') else [],
+        },
+    }
+    with open(checkpoint_dir / "training_state.json", "w") as f:
+        json.dump(training_state_dict, f, indent=2)
+    
+    # Save config
+    config_dict = {
+        "gamma": config.gamma,
+        "lam": config.lam,
+        "learning_rate": config.learning_rate,
+        "clip_epsilon": config.clip_epsilon,
+        "entropy_coef": config.entropy_coef,
+        "value_coef": config.value_coef,
+        "rollout_length": config.rollout_length,
+        "sequence_length": config.sequence_length,
+        "num_epochs": config.num_epochs,
+        "minibatch_size": config.minibatch_size,
+        "use_evolution": config.use_evolution,
+        "evolution_interval": config.evolution_interval,
+        "use_rajs": config.use_rajs,
+        "gru_hidden_dim": config.policy_config.gru_hidden_dim,
+    }
+    with open(checkpoint_dir / "config.json", "w") as f:
+        json.dump(config_dict, f, indent=2)
+    
+    # Save training logs
+    if training_logs:
+        with open(checkpoint_dir / "training_logs.json", "w") as f:
+            json.dump(training_logs, f, indent=2)
+    
+    LOGGER.info(f"Checkpoint saved: {checkpoint_dir}")
+    return checkpoint_dir
+
+
+def load_checkpoint(checkpoint_dir: Path, config: "TrainingConfig") -> Tuple["TrainingState", List[Dict]]:
+    """
+    Load training checkpoint.
+    
+    Returns:
+        Tuple of (TrainingState, training_logs)
+    """
+    LOGGER.info(f"Loading checkpoint from: {checkpoint_dir}")
+    
+    # Load model parameters
+    with open(checkpoint_dir / "model_params.pkl", "rb") as f:
+        params_np = pickle.load(f)
+    params = jax.tree_util.tree_map(jnp.array, params_np)
+    
+    # Load optimizer state
+    with open(checkpoint_dir / "optimizer_state.pkl", "rb") as f:
+        opt_state_np = pickle.load(f)
+    opt_state = jax.tree_util.tree_map(
+        lambda x: jnp.array(x) if isinstance(x, np.ndarray) else x,
+        opt_state_np
+    )
+    
+    # Load training state
+    with open(checkpoint_dir / "training_state.json", "r") as f:
+        ts = json.load(f)
+    
+    # Reconstruct normalizers
+    obs_rms = RunningNormalizer(
+        count=ts["obs_rms"]["count"],
+        mean=np.array(ts["obs_rms"]["mean"], dtype=np.float32),
+        m2=np.array(ts["obs_rms"]["m2"], dtype=np.float32),
+    )
+    return_rms = RunningNormalizer(
+        count=ts["return_rms"]["count"],
+        mean=np.array(ts["return_rms"]["mean"], dtype=np.float32) if ts["return_rms"]["mean"] else np.zeros((0,), dtype=np.float32),
+        m2=np.array(ts["return_rms"]["m2"], dtype=np.float32) if ts["return_rms"]["m2"] else np.zeros((0,), dtype=np.float32),
+    )
+    
+    # Create training state
+    rng = jax.random.PRNGKey(42)  # Will be re-seeded
+    state = TrainingState(
+        params=params,
+        opt_state=opt_state,
+        rng=rng,
+        obs_rms=obs_rms,
+        return_rms=return_rms,
+        update_step=ts["update_step"],
+        stage_index=ts["stage_index"],
+        stage_episode=ts["stage_episode"],
+        best_return=ts["best_return"],
+        moving_avg_return=ts["moving_avg_return"],
+        total_successes=ts["total_successes"],
+        stage_successes=ts["stage_successes"],
+        stage_attempts=ts["stage_attempts"],
+        recent_successes=ts["recent_successes"],
+    )
+    
+    # Load training logs
+    logs_path = checkpoint_dir / "training_logs.json"
+    training_logs = []
+    if logs_path.exists():
+        with open(logs_path, "r") as f:
+            training_logs = json.load(f)
+    
+    LOGGER.info(f"Loaded: ep={ts['update_step']}, stage={ts['stage_index']}, best_R={ts['best_return']:.1f}")
+    return state, training_logs
 
 
 @dataclass
@@ -88,7 +256,7 @@ class TrainingState:
     stage_successes: int = 0
     stage_attempts: int = 0
     recent_successes: List[bool] = field(default_factory=list)
-    rolling_window_size: int = 30 # Increased for more stable curriculum transitions
+    rolling_window_size: int = 50  # Larger window for reliable SR calculation
 
     def update_rolling_success(self, success: bool) -> float:
         self.recent_successes.append(success)
@@ -102,8 +270,8 @@ class TrainingConfig:
     """Configuration for Recurrent PPO."""
     gamma: float = 0.99
     lam: float = 0.95
-    learning_rate: float = 1e-4  # Reduced for GRU stability
-    clip_epsilon: float = 0.1  # Tighter clipping for stability (was 0.2)
+    learning_rate: float = 5e-5  # Further reduced for better stability
+    clip_epsilon: float = 0.1  # Tighter clipping for stability
     
     # Environment settings
     dt: float = 0.02
@@ -111,7 +279,7 @@ class TrainingConfig:
     eval_max_steps: int = 500
     
     # Sequence settings
-    rollout_length: int = 6144  # Increased for better gradient estimates (64*96=6144)
+    rollout_length: int = 3072  # Balanced rollout size for stable training
     sequence_length: int = 64  # Time horizon for GRU backprop
     
     num_epochs: int = 4  # Reduced epochs for RNN safety
@@ -148,19 +316,28 @@ class TrainingConfig:
     evolution_eval_episodes: int = 3  # Episodes to evaluate each candidate
     fitness_episodes: int = 3
     evolution_warmup_episodes: int = 50  # No evolution during initial learning
+    evolution_stage_lockout: int = 30  # No evolution for first N episodes after stage transition
 
     # RAJS (Random Annealing Jump Start) - 2024 IROS paper achieving 97% rocket landing success
     use_rajs: bool = True
-    rajs_initial_guide_steps: int = 150  # Max guide steps at start (decreases with annealing)
-    rajs_annealing_rate: float = 0.995  # How fast guide horizon decreases per episode
+    rajs_initial_guide_steps: int = 200  # Increased guide steps for better demonstration
+    rajs_annealing_rate: float = 0.998  # Much slower decay for thorough learning
     rajs_adaptive: bool = True  # Tie annealing to success rate instead of episode count
     
     # Value Pretraining - stabilizes advantage estimates from the start
-    value_pretrain_updates: int = 50  # Train value head alone for first N updates
+    value_pretrain_updates: int = 100  # Longer warmup for value function stability
     value_pretrain_coef: float = 1.0  # Higher coefficient during pretraining
     
     # Staged exploration - reset entropy on stage advancement
     staged_exploration_reset: float = 0.7  # Reset entropy to this fraction of original on stage change
+    
+    # Value function stabilization (research-backed)
+    value_loss_clip: float = 10.0  # Clip extreme value losses to prevent instability
+    soft_reset_momentum_keep: float = 0.5  # Keep 50% of momentum to prevent loss spikes after evolution
+    
+    # Checkpointing
+    checkpoint_interval: int = 50  # Save checkpoint every N episodes
+    save_best: bool = True  # Save best model based on return
 
     policy_config: PolicyConfig = PolicyConfig()
     rocket_params: RocketParams = RocketParams()
@@ -273,6 +450,7 @@ def _collect_rollout(
         
         # RAJS: Override action with smart PD heuristic during guide phase
         # Uses proportional-derivative control based on altitude and velocity
+        # ENHANCED: Now includes orientation feedback for true TVC stabilization
         if config.use_rajs and episode_step < rajs_guide_horizon:
             # Extract state from raw observation (denormalized)
             obs_raw = observation  # Use raw obs, not normalized
@@ -297,13 +475,45 @@ def _collect_rollout(
             vx, vy = float(obs_raw[3]), float(obs_raw[4])
             px, py = float(obs_raw[0]), float(obs_raw[1])
             
-            # PD controller for gimbal (stabilize lateral motion)
+            # ============================================================
+            # CRITICAL: Orientation-based gimbal control for TVC stabilization
+            # This is what makes the rocket ACTIVELY COUNTERACT TILT
+            # ============================================================
+            # Get orientation from quaternion (indices 6-9 in raw obs)
+            # obs layout: [pos(3), vel(3), quat(4), omega(3), ...]
+            qw = float(obs_raw[6])
+            qx = float(obs_raw[7])
+            qy = float(obs_raw[8])
+            # qz = float(obs_raw[9])  # Not needed for pitch/roll
+            
+            # Convert quaternion to approximate tilt angles (valid for small angles)
+            # roll ≈ 2*qx (tilt around X axis)
+            # pitch ≈ 2*qy (tilt around Y axis)
+            roll_tilt = 2.0 * qx
+            pitch_tilt = 2.0 * qy
+            
+            # Get angular velocity (indices 10-12)
+            omega_x = float(obs_raw[10])  # Angular velocity around X
+            omega_y = float(obs_raw[11])  # Angular velocity around Y
+            
+            # PD gains for position correction
             kp_gimbal = 0.02
             kd_gimbal = 0.05
-            gimbal_x = -kp_gimbal * px - kd_gimbal * vx
-            gimbal_y = -kp_gimbal * py - kd_gimbal * vy
-            gimbal_x = np.clip(gimbal_x, -0.1, 0.1)
-            gimbal_y = np.clip(gimbal_y, -0.1, 0.1)
+            
+            # PD gains for orientation correction (CRITICAL for TVC)
+            kp_orient = 0.12   # Orientation proportional gain
+            kd_orient = 0.06   # Angular velocity damping
+            
+            # Combined gimbal control: position + orientation corrections
+            # Gimbal X (pitch control): correct for forward tilt and lateral Y drift
+            # Gimbal Y (roll control): correct for roll tilt and lateral X drift
+            gimbal_x = (-kp_gimbal * px - kd_gimbal * vx 
+                       - kp_orient * pitch_tilt - kd_orient * omega_y)
+            gimbal_y = (-kp_gimbal * py - kd_gimbal * vy 
+                       + kp_orient * roll_tilt + kd_orient * omega_x)
+            
+            gimbal_x = np.clip(gimbal_x, -0.12, 0.12)
+            gimbal_y = np.clip(gimbal_y, -0.12, 0.12)
             
             action = jnp.array([[gimbal_x, gimbal_y, thrust]])
         episode_step += 1
@@ -374,8 +584,9 @@ def _collect_rollout(
                 # Adaptive annealing: use success rate instead of episode count
                 if config.rajs_adaptive:
                     # Higher success rate = less guidance needed
+                    # BUT: Never drop below 30% guide to ensure continuous demonstration
                     success_rate = len([s for s in episode_successes if s]) / max(len(episode_successes), 1)
-                    annealing_factor = 1.0 - success_rate  # 0% success = full guide, 100% = no guide
+                    annealing_factor = max(0.3, 1.0 - success_rate * 0.7)  # Floor at 30%
                 else:
                     # Original: episode-based annealing
                     annealing_factor = config.rajs_annealing_rate ** state.update_step
@@ -510,11 +721,14 @@ def _ppo_update(
         
         # Clipped value function loss (PPO best practice for stability)
         old_values = minibatch["values"]
-        returns = jnp.clip(minibatch["returns"], -config.return_clip_limit, config.return_clip_limit)  # Clip extreme returns
+        returns = jnp.clip(minibatch["returns"], -config.return_clip_limit, config.return_clip_limit)
         value_clipped = old_values + jnp.clip(values - old_values, -config.value_clip_epsilon, config.value_clip_epsilon)
         value_loss_unclipped = jnp.square(returns - values)
         value_loss_clipped = jnp.square(returns - value_clipped)
         value_loss = 0.5 * jnp.mean(jnp.maximum(value_loss_unclipped, value_loss_clipped))
+        
+        # CRITICAL: Clip extreme value losses to prevent instability (research-backed)
+        value_loss = jnp.clip(value_loss, 0.0, config.value_loss_clip)
         
         # Entropy with stability
         log_std_clipped = jnp.clip(log_std, config.log_std_clip_min, config.log_std_clip_max)
@@ -691,6 +905,15 @@ def train_controller(
         # Rollout
         batch, stats = _collect_rollout(env, stage, state, funcs, config, viewer)
         
+        # Track training logs for checkpoint
+        log_entry = {
+            "episode": episode,
+            "return": float(stats['episode_return']),
+            "success": stats['episode_success'],
+            "stage": state.stage_index,
+            "timestamp": datetime.now().isoformat(),
+        }
+        
         # ============================================================
         # VALUE PRETRAINING: First N updates train value function only
         # This stabilizes advantage estimates before actor learning
@@ -722,25 +945,37 @@ def train_controller(
         
         rolling_sr = state.update_rolling_success(stats['episode_success'])
         
+        # Enhanced logging with stage name
+        success_emoji = "✓" if stats['episode_success'] else "✗"
         if episode % 10 == 0:
-            LOGGER.info(f"Ep {episode:4d} | R: {stats['episode_return']:8.1f} | Loss: {metrics['loss']:7.4f} | SR: {rolling_sr*100:4.1f}% | Stage: {state.stage_index}")
+            LOGGER.info(f"Ep {episode:4d} | R: {stats['episode_return']:7.1f} | Loss: {metrics['loss']:6.2f} | SR: {rolling_sr*100:4.1f}% | Stage: {stage.name} | {success_emoji}")
         
         # Advance Curriculum
-        # If success rate >= 70% and we've done at least min_episodes for the stage
+        # STRICTER GATE: 80% SR + consecutive successes + min episodes
         previous_stage_index = state.stage_index
-        if rolling_sr >= 0.7 and state.stage_attempts >= stage.min_episodes:
+        consecutive_success_req = 5  # Must win 5 in a row
+        recent_streak = sum(1 for s in state.recent_successes[-consecutive_success_req:] if s) if state.recent_successes else 0
+        has_streak = recent_streak >= consecutive_success_req
+        
+        # Stage 0 (Hover) requires 80% SR, other stages require 75%
+        sr_threshold = 0.80 if state.stage_index == 0 else 0.75
+        
+        if rolling_sr >= sr_threshold and state.stage_attempts >= stage.min_episodes and has_streak:
             if state.stage_index < len(curriculum) - 1:
+                old_stage_name = curriculum[state.stage_index].name
                 state.stage_index += 1
                 state.stage_attempts = 0
                 state.stage_successes = 0
                 state.recent_successes = []
-                LOGGER.info(f"*** Advancing to Stage {state.stage_index}: {curriculum[state.stage_index].name} ***")
+                new_stage = curriculum[state.stage_index]
+                LOGGER.info(f"")
+                LOGGER.info(f"STAGE UP! {old_stage_name} -> {new_stage.name}")
+                LOGGER.info(f"   New altitude: {new_stage.initial_position[2]:.0f}m | Target SR: {sr_threshold*100:.0f}%")
                 
                 # STAGED EXPLORATION RESET: Boost entropy on stage transition for renewed exploration
                 if config.staged_exploration_reset > 0:
                     old_entropy = entropy_coef
                     entropy_coef = config.entropy_coef * config.staged_exploration_reset
-                    LOGGER.info(f"  Staged exploration: entropy reset {old_entropy:.4f} -> {entropy_coef:.4f}")
         
         # Decay entropy (only if stage didn't just advance)
         if state.stage_index == previous_stage_index:
@@ -749,11 +984,13 @@ def train_controller(
         # ============================================================
         # EVOLUTION: Safe Mutation through Gradients (SM-G) for GRU
         # ============================================================
-        # Skip evolution during warmup period to establish stable learning
+        # Skip evolution during: warmup, stage lockout period, or not on interval
+        stage_episodes_since_advance = state.stage_attempts
         evolution_ready = (
             config.use_evolution 
             and episode > config.evolution_warmup_episodes 
             and episode % config.evolution_interval == 0
+            and stage_episodes_since_advance > config.evolution_stage_lockout  # NEW: Stage lockout
         )
         if evolution_ready:
             from .policies import safe_mutate_parameters_smg
@@ -769,6 +1006,12 @@ def train_controller(
             best_params = state.params
             best_fitness = stats['episode_return']
             
+            # ADAPTIVE MUTATION: Start with smaller mutations, ramp up over training
+            # This prevents evolution from disrupting early learning
+            episode_progress = min(episode / total_episodes, 1.0)
+            adaptive_mutation_scale = config.mutation_scale * (0.3 + 0.7 * episode_progress)
+            # Early (ep 0): 30% mutation, Late (ep 1000): 100% mutation
+            
             for candidate_idx in range(config.evolution_candidates):
                 state.rng, mut_key = jax.random.split(state.rng)
                 
@@ -779,7 +1022,7 @@ def train_controller(
                     funcs,
                     sample_obs,  # Already [1, SeqLen, Features]
                     sample_hidden,
-                    scale=config.mutation_scale,
+                    scale=adaptive_mutation_scale,  # Use adaptive scale
                 )
                 
                 # Evaluate mutant
@@ -798,14 +1041,45 @@ def train_controller(
                 state.params = best_params
                 LOGGER.info(f"  Evolution: Accepted mutant with R: {best_fitness:.1f}")
                 
-                # CRITICAL FIX: Reset optimizer state when params change discontinuously!
-                # breakdown:
-                # 1. The new params are a "jump" in the landscape.
-                # 2. Old momentum (mu, nu) from Adam is now invalid/stale.
-                # 3. Applying old momentum to new params causes massive instability.
-                LOGGER.info("  Evolution: Resetting optimizer state to match new parameters.")
-                state.opt_state = optimizer.init(state.params)
+                # RESEARCH-BASED FIX: Soft optimizer reset preserving partial momentum
+                # Full reset destroys Adam's accumulated gradient statistics
+                # Soft reset keeps some momentum for smoother transitions
+                LOGGER.info(f"  Evolution: Soft optimizer reset (keeping {config.soft_reset_momentum_keep*100:.0f}% momentum)")
+                new_opt_state = optimizer.init(state.params)
+                
+                # Blend old and new optimizer states (preserve partial momentum)
+                # This prevents the massive loss spikes after evolution
+                def blend_opt_states(old, new):
+                    if isinstance(old, jnp.ndarray) and isinstance(new, jnp.ndarray):
+                        if old.shape == new.shape:
+                            return config.soft_reset_momentum_keep * old + (1 - config.soft_reset_momentum_keep) * new
+                    return new
+                
+                try:
+                    state.opt_state = jax.tree_util.tree_map(blend_opt_states, state.opt_state, new_opt_state)
+                except:
+                    # Fallback to full reset if blending fails
+                    state.opt_state = new_opt_state
         
+        # ============================================================
+        # CHECKPOINTING: Save model periodically and on best
+        # ============================================================
+        state.history.append(log_entry)
+        
+        # Save checkpoint at intervals
+        if output_dir and episode > 0 and episode % config.checkpoint_interval == 0:
+            save_checkpoint(state, config, episode, output_dir, is_best=False, training_logs=state.history)
+        
+        # Save best model
+        if config.save_best and stats['episode_return'] > state.best_return:
+            if output_dir:
+                save_checkpoint(state, config, episode, output_dir, is_best=True, training_logs=state.history)
+        
+    # Final save
+    if output_dir:
+        LOGGER.info("Saving final checkpoint...")
+        save_checkpoint(state, config, total_episodes, output_dir, is_best=False, training_logs=state.history)
+    
     return state
 
 
