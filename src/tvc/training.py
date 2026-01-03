@@ -479,22 +479,31 @@ def _collect_rollout(
             # CRITICAL: Orientation-based gimbal control for TVC stabilization
             # This is what makes the rocket ACTIVELY COUNTERACT TILT
             # ============================================================
-            # Get orientation from quaternion (indices 6-9 in raw obs)
-            # obs layout: [pos(3), vel(3), quat(4), omega(3), ...]
-            qw = float(obs_raw[6])
-            qx = float(obs_raw[7])
-            qy = float(obs_raw[8])
-            # qz = float(obs_raw[9])  # Not needed for pitch/roll
+            # Observation layout (44 dims total):
+            #   [0:3]   = pos (px, py, pz)
+            #   [3:6]   = vel (vx, vy, vz)
+            #   [6:15]  = rotation matrix R flattened (9 elements)
+            #   [15:18] = angular velocity omega (wx, wy, wz)
+            #   [18:20] = gimbal angles
+            #   [20:22] = gimbal velocities
+            #   [22:...] = targets, errors, etc.
             
-            # Convert quaternion to approximate tilt angles (valid for small angles)
-            # roll ≈ 2*qx (tilt around X axis)
-            # pitch ≈ 2*qy (tilt around Y axis)
-            roll_tilt = 2.0 * qx
-            pitch_tilt = 2.0 * qy
+            # Extract rotation matrix (3x3) from indices [6:15]
+            R_flat = obs_raw[6:15]
+            # R is stored row-major: R[i,j] = R_flat[i*3 + j]
+            # R[:, 2] is body Z-axis in world frame
+            # R[2, 0] ≈ sin(pitch) for small angles
+            # R[2, 1] ≈ -sin(roll) for small angles
+            R_20 = float(R_flat[6])  # R[2,0] = sin(pitch)
+            R_21 = float(R_flat[7])  # R[2,1] = -sin(roll)
             
-            # Get angular velocity (indices 10-12)
-            omega_x = float(obs_raw[10])  # Angular velocity around X
-            omega_y = float(obs_raw[11])  # Angular velocity around Y
+            # Tilt angles from rotation matrix (more accurate than quaternion approx)
+            pitch_tilt = R_20   # Positive = tilted forward
+            roll_tilt = -R_21   # Positive = tilted right
+            
+            # Get angular velocity from correct indices [15:18]
+            omega_x = float(obs_raw[15])  # Angular velocity around X
+            omega_y = float(obs_raw[16])  # Angular velocity around Y
             
             # PD gains for position correction
             kp_gimbal = 0.02
