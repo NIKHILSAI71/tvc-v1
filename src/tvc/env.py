@@ -235,8 +235,8 @@ class TvcEnv:
         # STRENGTHENED: For hover stabilization, add significant offset to force correction
         # This prevents "Null-Op Success" where agent just spawns at target and wins
         if getattr(self, "_stage_config", {}).get("stage_name") == "hover_stabilization":
-             # ±0.4m initial error (Reduced from 0.8 to prevent instability)
-             pos_noise = self._rng.uniform(-0.4, 0.4, 3) 
+             # ±0.2m initial error - ensures success is achievable with 1.2m tolerance
+             pos_noise = self._rng.uniform(-0.2, 0.2, 3) 
              # Ensure Z doesn't go below safety margins (start at 8m, so -0.8 is fine)
         else:
              pos_noise = self._rng.normal(0.0, 0.05 * noise_scale, 3)  # Standard GPS noise
@@ -283,12 +283,12 @@ class TvcEnv:
 
         # Action smoothing for position commands
         # Helps filter high-frequency noise while maintaining responsiveness
-        # TUNING: Reduced alpha 0.8 -> 0.3 to heavily filter policy jitter/vibration
-        # This acts as a software low-pass filter on the "nervous" random policy
-        alpha = 0.3
+        # TUNING: Higher alpha = more responsive to policy commands
+        # Too low prevents learning; too high causes jitter
+        alpha = 0.7
         self._smoothed_action[0] = alpha * action[0] + (1.0 - alpha) * self._smoothed_action[0]  # gimbal_x
         self._smoothed_action[1] = alpha * action[1] + (1.0 - alpha) * self._smoothed_action[1]  # gimbal_y
-        self._smoothed_action[2] = 0.2 * action[2] + 0.8 * self._smoothed_action[2]  # thrust (very smooth)
+        self._smoothed_action[2] = 0.5 * action[2] + 0.5 * self._smoothed_action[2]  # thrust (moderate smooth)
         
         smoothed_action = self._smoothed_action.copy()
 
@@ -499,17 +499,9 @@ class TvcEnv:
         
         # HOVER STAGE REWARDS (Stage 0: 3m Hover)
         if "Hover" in stage_name or target_altitude >= 2.5:
-            # Reward for maintaining exact position (not just being close)
-            if pos_error < 0.3:  # Very precise position
-                hover_precision_reward = 10.0
-            elif pos_error < 0.6:
-                hover_precision_reward = 5.0
-            
-            # Extra reward for true zero velocity (hovering, not drifting)
-            if vel_error < 0.2:
-                hover_precision_reward += 8.0
-            elif vel_error < 0.4:
-                hover_precision_reward += 4.0
+            # SIMPLIFIED: Single continuous hover precision reward
+            # Avoids step functions that cause high variance in value learning
+            hover_precision_reward = 15.0 / (1.0 + pos_error + vel_error)
         
         # LANDING STAGE REWARDS (Stages with target altitude <= 1.5m)
         elif target_altitude <= 1.5:

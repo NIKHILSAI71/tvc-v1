@@ -45,23 +45,23 @@ def build_curriculum() -> List[CurriculumStage]:
     # ============================================================
     hover_stage = CurriculumStage(
         name="3m Hover",
-        episodes=250,
+        episodes=400,  # More episodes to learn
         target_position=(0.0, 0.0, 3.0),  # Hover at 3m
         target_orientation=(1.0, 0.0, 0.0, 0.0),
         target_velocity=(0.0, 0.0, 0.0),  # Zero velocity (true hover)
         target_angular_velocity=(0.0, 0.0, 0.0),
         
         initial_position=(0.0, 0.0, 3.5),  # Start slightly above target
-        initial_velocity=(0.0, 0.0, -0.3),  # Gentle initial descent
+        initial_velocity=(0.0, 0.0, -0.1),  # Gentler initial descent
         initial_orientation=(1.0, 0.0, 0.0, 0.0),
         initial_angular_velocity=(0.0, 0.0, 0.0),
         
-        position_tolerance=0.8,   # Must hold position tightly
-        velocity_tolerance=0.4,   # Near-zero velocity required
+        position_tolerance=1.2,   # Start easier, tighten in later stages
+        velocity_tolerance=0.6,   # Allow more velocity initially
         orientation_tolerance=0.2,  # ~11 degrees max tilt
         angular_velocity_tolerance=0.3,
         tolerance_bonus=0.5,
-        success_episodes=10,  # Must succeed multiple times consistently
+        success_episodes=5,   # Lower to allow faster progression
         min_episodes=100      # Minimum training before advancement
     )
 
