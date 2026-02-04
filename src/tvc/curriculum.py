@@ -45,24 +45,26 @@ def build_curriculum() -> List[CurriculumStage]:
     # ============================================================
     hover_stage = CurriculumStage(
         name="3m Hover",
-        episodes=400,  # More episodes to learn
-        target_position=(0.0, 0.0, 3.0),  # Hover at 3m
+        episodes=400,
+        target_position=(0.0, 0.0, 3.0),
         target_orientation=(1.0, 0.0, 0.0, 0.0),
-        target_velocity=(0.0, 0.0, 0.0),  # Zero velocity (true hover)
+        target_velocity=(0.0, 0.0, 0.0),
         target_angular_velocity=(0.0, 0.0, 0.0),
         
-        initial_position=(0.0, 0.0, 3.5),  # Start slightly above target
-        initial_velocity=(0.0, 0.0, -0.1),  # Gentler initial descent
+        # PHASE 1: Very easy initial conditions for pure PPO
+        initial_position=(0.0, 0.0, 3.2),  # Start very close to target
+        initial_velocity=(0.0, 0.0, -0.05),  # Almost no initial velocity
         initial_orientation=(1.0, 0.0, 0.0, 0.0),
         initial_angular_velocity=(0.0, 0.0, 0.0),
         
-        position_tolerance=1.2,   # Start easier, tighten in later stages
-        velocity_tolerance=0.6,   # Allow more velocity initially
-        orientation_tolerance=0.2,  # ~11 degrees max tilt
-        angular_velocity_tolerance=0.3,
+        # PHASE 1: Very wide tolerances for easy success
+        position_tolerance=2.5,   # Very easy (was 1.2)
+        velocity_tolerance=1.5,   # Very easy (was 0.6)
+        orientation_tolerance=0.3,  # ~17 degrees max tilt
+        angular_velocity_tolerance=0.5,
         tolerance_bonus=0.5,
-        success_episodes=5,   # Lower to allow faster progression
-        min_episodes=100      # Minimum training before advancement
+        success_episodes=3,   # Low bar for progression
+        min_episodes=50       # Short warmup before advancement
     )
 
     # ============================================================

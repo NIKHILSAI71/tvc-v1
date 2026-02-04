@@ -238,12 +238,19 @@ class RunningNormalizer:
 
 @dataclass
 class TrainingState:
-    """Recurrent PPO + Evolution training state."""
+    """Recurrent PPO + Staged Learning training state.
+    
+    Learning Phases:
+        Phase 0: Neuroevolution Warmup - Pure evolution to find good starting weights
+        Phase 1: Pure PPO (0-40% SR) - Learn basic hover control
+        Phase 2: PPO + RAJS (40-70% SR) - Add heuristic guidance
+        Phase 3: Full Hybrid (70%+ SR) - Add neuroevolution
+    """
     params: Any
     opt_state: optax.OptState
     rng: jax.Array
     obs_rms: RunningNormalizer
-    return_rms: RunningNormalizer = field(default_factory=lambda: RunningNormalizer()) # Track returns for normalization
+    return_rms: RunningNormalizer = field(default_factory=lambda: RunningNormalizer())
     history: List[Dict[str, Any]] = field(default_factory=list)
     update_step: int = 0
     stage_index: int = 0
@@ -257,13 +264,55 @@ class TrainingState:
     stage_attempts: int = 0
     recent_successes: List[bool] = field(default_factory=list)
     rolling_window_size: int = 50
-    post_evolution_cooldown_counter: int = 0  # Tracks episodes since last evolution acceptance  # Larger window for reliable SR calculation
+    post_evolution_cooldown_counter: int = 0
+    
+    # STAGED LEARNING: Automatic progression based on success rate
+    learning_phase: int = 0           # 0=Neuroevo Warmup, 1=Pure PPO, 2=RAJS, 3=Full Hybrid
+    rajs_enabled: bool = False        # Enable RAJS at 40% SR
+    evolution_enabled: bool = False   # Enable Evolution at 70% SR
+    
+    # NEUROEVOLUTION ENHANCEMENTS (AS Rocketry-inspired)
+    elite_archive: List[Tuple[float, Any]] = field(default_factory=list)  # (fitness, params) sorted by fitness
+    elite_archive_max_size: int = 5   # Keep top K policies for diversity
+    recent_parent_fitness: List[float] = field(default_factory=list)  # Rolling fitness for comparison
+    neuroevo_warmup_complete: bool = False  # Track if warmup phase is done
 
     def update_rolling_success(self, success: bool) -> float:
         self.recent_successes.append(success)
         if len(self.recent_successes) > self.rolling_window_size:
             self.recent_successes.pop(0)
         return sum(self.recent_successes) / len(self.recent_successes) if self.recent_successes else 0.0
+    
+    def update_elite_archive(self, fitness: float, params: Any) -> bool:
+        """Add to elite archive if fitness is good enough. Returns True if added."""
+        # Don't add if archive is full and fitness is worse than worst elite
+        if len(self.elite_archive) >= self.elite_archive_max_size:
+            worst_fitness = self.elite_archive[-1][0]
+            if fitness <= worst_fitness:
+                return False
+            # Remove worst to make room
+            self.elite_archive.pop()
+        
+        # Insert in sorted position (descending by fitness)
+        insert_idx = 0
+        for i, (f, _) in enumerate(self.elite_archive):
+            if fitness > f:
+                break
+            insert_idx = i + 1
+        self.elite_archive.insert(insert_idx, (fitness, copy.deepcopy(params)))
+        return True
+    
+    def get_rolling_parent_fitness(self) -> float:
+        """Get average fitness over recent episodes for stable comparison."""
+        if not self.recent_parent_fitness:
+            return -float('inf')
+        return sum(self.recent_parent_fitness) / len(self.recent_parent_fitness)
+    
+    def update_parent_fitness(self, fitness: float, window_size: int = 10):
+        """Update rolling parent fitness for smoother evolution comparisons."""
+        self.recent_parent_fitness.append(fitness)
+        if len(self.recent_parent_fitness) > window_size:
+            self.recent_parent_fitness.pop(0)
 
 
 @dataclass(frozen=True)
@@ -288,8 +337,8 @@ class TrainingConfig:
     
     value_clip_epsilon: float = 0.2
     grad_clip_norm: float = 0.5  # Tighter clipping for RNN
-    entropy_coef: float = 0.03  # Higher for better exploration at new stages
-    entropy_coef_decay: float = 0.9995  # Slower decay for longer exploration
+    entropy_coef: float = 0.05  # Higher for pure PPO exploration
+    entropy_coef_decay: float = 0.9998  # Very slow decay for longer exploration
     value_coef: float = 0.5
     weight_decay: float = 1e-5
     
@@ -306,12 +355,12 @@ class TrainingConfig:
     return_clip_limit: float = 1e4
     norm_return_clip: float = 10.0
     target_kl: float = 0.02  # KL threshold for early stopping
-
-    use_evolution: bool = True  
+    # STAGED LEARNING: Evolution disabled by default, enabled automatically at 70% SR
+    use_evolution: bool = False  # Enabled by progression system
     evolution_interval: int = 50  # Less frequent evolution to allow PPO to converge
     evolution_candidates: int = 4  # Number of mutants to evaluate per evolution step
-    evolution_eval_episodes: int = 3  # Episodes to evaluate each candidate
-    fitness_episodes: int = 3
+    evolution_eval_episodes: int = 5  # Increased from 3 for smoother fitness estimates
+    fitness_episodes: int = 5  # Increased for stability
     evolution_warmup_episodes: int = 150  # Longer warmup for PPO to establish good gradients
     evolution_stage_lockout: int = 75  # Longer lockout after stage transition
     
@@ -319,14 +368,18 @@ class TrainingConfig:
     mutation_scale: float = 0.02  # Reduced from 0.05 for RNN stability
     post_evolution_cooldown: int = 10  # Episodes to use reduced PPO epochs after evolution
     post_evolution_epochs: int = 2  # Fewer PPO epochs during cooldown (prevents loss spikes)
-    fitness_improvement_threshold: float = 1.10  # Mutant must be 10% better to accept
+    fitness_improvement_threshold: float = 1.05  # Reduced to 5% - more responsive to improvements
     post_evolution_lr_scale: float = 0.3  # Scale LR down after evolution for warmup
 
-    # RAJS (Random Annealing Jump Start) - 2024 IROS paper achieving 97% rocket landing success
-    use_rajs: bool = True
-    rajs_initial_guide_steps: int = 80  # Shorter guidance to allow learning
-    rajs_annealing_rate: float = 0.99  # Faster decay to transfer control to agent
-    rajs_adaptive: bool = True  # Tie annealing to success rate instead of episode count
+    # STAGED LEARNING: RAJS disabled by default, enabled automatically at 40% SR
+    use_rajs: bool = False  # Enabled by progression system
+    rajs_initial_guide_steps: int = 60  # Reduced guidance when enabled
+    rajs_annealing_rate: float = 0.995  # Faster decay
+    rajs_adaptive: bool = True
+    
+    # STAGED LEARNING: Automatic progression thresholds
+    rajs_enable_threshold: float = 0.40   # Enable RAJS at 40% success rate
+    evolution_enable_threshold: float = 0.70  # Enable Evolution at 70% success rate
     
     # Value Pretraining - stabilizes advantage estimates from the start
     value_pretrain_updates: int = 100  # Longer warmup for value function stability
@@ -342,6 +395,15 @@ class TrainingConfig:
     # Checkpointing
     checkpoint_interval: int = 50  # Save checkpoint every N episodes
     save_best: bool = True  # Save best model based on return
+    
+    # NEUROEVOLUTION ENHANCEMENTS (AS Rocketry-inspired)
+    neuroevo_warmup_episodes: int = 30   # Pure evolution before PPO kicks in
+    neuroevo_warmup_mutations: int = 8   # Mutations per episode during warmup
+    elite_archive_size: int = 5          # Top K policies for diversity
+    use_parameter_noise: bool = True     # Add noise during rollouts for exploration
+    parameter_noise_scale: float = 0.005 # Small noise for exploration
+    use_elite_crossover: bool = True     # Enable crossover with elite archive
+    crossover_probability: float = 0.3   # Probability of crossover vs pure mutation
 
     policy_config: PolicyConfig = PolicyConfig()
     rocket_params: RocketParams = RocketParams()
@@ -453,9 +515,10 @@ def _collect_rollout(
         action = jnp.clip(action, -1.0, 1.0)
         
         # RAJS: Override action with smart PD heuristic during guide phase
+        # STAGED LEARNING: Only active when rajs_enabled (Phase 2+)
         # Uses proportional-derivative control based on altitude and velocity
-        # ENHANCED: Now includes orientation feedback for true TVC stabilization
-        if config.use_rajs and episode_step < rajs_guide_horizon:
+        rajs_active = (config.use_rajs or state.rajs_enabled) and episode_step < rajs_guide_horizon
+        if rajs_active:
             # Extract state from raw observation (denormalized)
             obs_raw = observation  # Use raw obs, not normalized
             alt = float(obs_raw[2])  # z position (altitude)
@@ -572,12 +635,23 @@ def _collect_rollout(
 
         # Update loop state
         if done:
-            # Check success
-            # (Reuse existing success logic)
+            # Check success - must meet ALL criteria:
+            # 1. Position within tolerance
+            # 2. Velocity within tolerance  
+            # 3. Orientation upright (quaternion w > 0.95 means < 18 degrees tilt)
+            # 4. Survived at least 80% of episode (for hover, must hold position)
             pos_error = float(np.linalg.norm(env.data.qpos[0:3] - np.array(stage.target_position)))
             vel_error = float(np.linalg.norm(env.data.qvel[0:3] - np.array(stage.target_velocity)))
-            # Simplified for brevity
-            episode_success = pos_error < stage.position_tolerance and vel_error < stage.velocity_tolerance 
+            quat_w = abs(env.data.qpos[3])  # Quaternion w component (1.0 = upright)
+            
+            # Success requires: position OK, velocity OK, upright, AND survived most of episode
+            min_survival = int(config.max_episode_steps * 0.7)  # Must survive 70% of episode
+            episode_success = (
+                pos_error < stage.position_tolerance 
+                and vel_error < stage.velocity_tolerance
+                and quat_w > 0.92  # < ~23 degrees tilt
+                and current_steps >= min_survival  # Must actually hover, not just start near
+            )
             
             episode_successes.append(episode_success)
             episode_returns.append(current_episode_return)
@@ -928,10 +1002,81 @@ def train_controller(
         }
         
         # ============================================================
+        # PHASE 0: NEUROEVOLUTION WARMUP (AS Rocketry-inspired)
+        # Pure evolution for first N episodes to find good starting weights
+        # This is much faster than PPO for initial exploration
+        # ============================================================
+        if episode < config.neuroevo_warmup_episodes and not state.neuroevo_warmup_complete:
+            from .policies import safe_mutate_parameters_smg, add_parameter_noise, crossover_parameters
+            
+            # Create sample data for sensitivity computation
+            sample_obs = batch["observations"][:config.sequence_length]
+            sample_obs = sample_obs.reshape(1, sample_obs.shape[0], sample_obs.shape[1])
+            gru_dim = config.policy_config.gru_hidden_dim
+            sample_hidden = jnp.zeros((1, gru_dim))
+            
+            current_fitness = stats['episode_return']
+            best_params = state.params
+            best_fitness = current_fitness
+            
+            # Multiple mutations per episode during warmup (faster exploration)
+            for mut_idx in range(config.neuroevo_warmup_mutations):
+                state.rng, mut_key, cross_key, select_key = jax.random.split(state.rng, 4)
+                
+                # Optionally crossover with elite before mutation (genetic diversity)
+                parent = state.params
+                if config.use_elite_crossover and len(state.elite_archive) > 0:
+                    if float(jax.random.uniform(select_key)) < config.crossover_probability:
+                        # Select random elite for crossover
+                        elite_idx = int(jax.random.randint(select_key, (), 0, len(state.elite_archive)))
+                        _, elite_params = state.elite_archive[elite_idx]
+                        parent = crossover_parameters(cross_key, state.params, elite_params, 0.5)
+                
+                # Aggressive mutation during warmup (exploring policy space)
+                warmup_mutation_scale = config.mutation_scale * 3.0  # 3x stronger for warmup
+                mutant_params = safe_mutate_parameters_smg(
+                    mut_key, parent, funcs, sample_obs, sample_hidden,
+                    scale=warmup_mutation_scale,
+                )
+                
+                # Quick evaluation (single episode for speed)
+                mutant_fitness = _evaluate_candidate(
+                    env, stage, mutant_params, funcs, state.obs_rms, config,
+                    num_episodes=1  # Fast eval during warmup
+                )
+                
+                if mutant_fitness > best_fitness:
+                    best_fitness = mutant_fitness
+                    best_params = mutant_params
+            
+            # Accept best mutant if improved
+            if best_fitness > current_fitness:
+                state.params = best_params
+                state.update_elite_archive(best_fitness, best_params)
+                LOGGER.info(f"  [Neuroevo Warmup] Ep {episode}: R {current_fitness:.1f} -> {best_fitness:.1f} (+{best_fitness-current_fitness:.1f})")
+            
+            # Update parent fitness tracking
+            state.update_parent_fitness(stats['episode_return'])
+            
+            # Dummy metrics for consistency
+            metrics = {"loss": 0.0, "actor_loss": 0.0, "value_loss": 0.0, "entropy": 0.0, "kl": 0.0}
+            
+            # Check if warmup should end
+            if episode == config.neuroevo_warmup_episodes - 1:
+                state.neuroevo_warmup_complete = True
+                state.learning_phase = 1
+                LOGGER.info("")
+                LOGGER.info("=" * 60)
+                LOGGER.info("PHASE 1: Pure PPO Starting (Neuroevo Warmup Complete)")
+                LOGGER.info(f"   Best warmup fitness: {state.best_return:.1f}")
+                LOGGER.info(f"   Elite archive size: {len(state.elite_archive)}")
+                LOGGER.info("=" * 60)
+        
+        # ============================================================
         # VALUE PRETRAINING: First N updates train value function only
         # This stabilizes advantage estimates before actor learning
         # ============================================================
-        if state.update_step < config.value_pretrain_updates:
+        elif state.update_step < config.value_pretrain_updates:
             # Value-only update: scale down actor loss, boost value loss
             value_pretrain_factor = 0.1  # Reduce actor influence
             # Pass to ppo_update (modify entropy_coef as proxy)
@@ -965,10 +1110,36 @@ def train_controller(
         
         rolling_sr = state.update_rolling_success(stats['episode_success'])
         
-        # Enhanced logging with stage name
+        # ============================================================
+        # STAGED LEARNING: Automatic Progression Based on Success Rate
+        # ============================================================
+        # Phase 1 → Phase 2: Enable RAJS at 40% success rate
+        if not state.rajs_enabled and rolling_sr >= config.rajs_enable_threshold and state.stage_attempts >= 50:
+            state.rajs_enabled = True
+            state.learning_phase = 2
+            LOGGER.info("")
+            LOGGER.info("=" * 60)
+            LOGGER.info("PHASE 2 UNLOCKED: RAJS Enabled (40% SR achieved)")
+            LOGGER.info("   Heuristic guidance will now assist learning")
+            LOGGER.info("=" * 60)
+        
+        # Phase 2 → Phase 3: Enable Evolution at 70% success rate
+        if not state.evolution_enabled and rolling_sr >= config.evolution_enable_threshold and state.stage_attempts >= 100:
+            state.evolution_enabled = True
+            state.learning_phase = 3
+            LOGGER.info("")
+            LOGGER.info("=" * 60)
+            LOGGER.info("PHASE 3 UNLOCKED: Evolution Enabled (70% SR achieved)")
+            LOGGER.info("   Neuroevolution will now explore policy mutations")
+            LOGGER.info("=" * 60)
+        
+        # Phase indicator for logging
+        phase_str = f"P{state.learning_phase}"
+        
+        # Enhanced logging with phase indicator
         success_emoji = "✓" if stats['episode_success'] else "✗"
         if episode % 10 == 0:
-            LOGGER.info(f"Ep {episode:4d} | R: {stats['episode_return']:7.1f} | Loss: {metrics['loss']:6.2f} | SR: {rolling_sr*100:4.1f}% | Stage: {stage.name} | {success_emoji}")
+            LOGGER.info(f"Ep {episode:4d} | {phase_str} | R: {stats['episode_return']:7.1f} | Loss: {metrics['loss']:6.2f} | SR: {rolling_sr*100:4.1f}% | {stage.name} | {success_emoji}")
         
         # Advance Curriculum
         # STRICTER GATE: 80% SR + consecutive successes + min episodes
@@ -1006,14 +1177,15 @@ def train_controller(
         # ============================================================
         # Skip evolution during: warmup, stage lockout period, or not on interval
         stage_episodes_since_advance = state.stage_attempts
+        # STAGED LEARNING: Only run evolution when enabled (Phase 3) or config override
         evolution_ready = (
-            config.use_evolution 
+            (config.use_evolution or state.evolution_enabled) 
             and episode > config.evolution_warmup_episodes 
             and episode % config.evolution_interval == 0
-            and stage_episodes_since_advance > config.evolution_stage_lockout  # NEW: Stage lockout
+            and stage_episodes_since_advance > config.evolution_stage_lockout
         )
         if evolution_ready:
-            from .policies import safe_mutate_parameters_smg
+            from .policies import safe_mutate_parameters_smg, crossover_parameters
             
             # Create sample data for sensitivity computation
             # sample_obs shape: [SeqLen, Features] -> [1, SeqLen, Features]
@@ -1022,9 +1194,13 @@ def train_controller(
             gru_dim = config.policy_config.gru_hidden_dim
             sample_hidden = jnp.zeros((1, gru_dim))  # GRU single state
             
-            # Generate mutant candidates using SM-G
+            # Use rolling fitness for stable comparison (AS Rocketry-inspired)
+            rolling_parent_fitness = state.get_rolling_parent_fitness()
+            current_episode_fitness = stats['episode_return']
+            
+            # Generate mutant candidates using SM-G + Elite Crossover
             best_params = state.params
-            best_fitness = stats['episode_return']
+            best_fitness = current_episode_fitness
             
             # ADAPTIVE MUTATION: Start with smaller mutations, ramp up over training
             # This prevents evolution from disrupting early learning
@@ -1033,19 +1209,30 @@ def train_controller(
             # Early (ep 0): 30% mutation, Late (ep 1000): 100% mutation
             
             for candidate_idx in range(config.evolution_candidates):
-                state.rng, mut_key = jax.random.split(state.rng)
+                state.rng, mut_key, cross_key, select_key = jax.random.split(state.rng, 4)
+                
+                # ELITE CROSSOVER: Optionally combine with elite before mutation
+                parent = state.params
+                crossover_used = False
+                if config.use_elite_crossover and len(state.elite_archive) > 0:
+                    if float(jax.random.uniform(select_key)) < config.crossover_probability:
+                        # Select random elite from top performers
+                        elite_idx = int(jax.random.randint(select_key, (), 0, len(state.elite_archive)))
+                        _, elite_params = state.elite_archive[elite_idx]
+                        parent = crossover_parameters(cross_key, state.params, elite_params, 0.5)
+                        crossover_used = True
                 
                 # Safe mutation - scales mutation inversely to output sensitivity
                 mutant_params = safe_mutate_parameters_smg(
                     mut_key,
-                    state.params,
+                    parent,
                     funcs,
                     sample_obs,  # Already [1, SeqLen, Features]
                     sample_hidden,
                     scale=adaptive_mutation_scale,  # Use adaptive scale
                 )
                 
-                # Evaluate mutant
+                # Evaluate mutant with more episodes for stable estimate
                 mutant_fitness = _evaluate_candidate(
                     env, stage, mutant_params, funcs, state.obs_rms, config,
                     num_episodes=config.evolution_eval_episodes
@@ -1054,17 +1241,23 @@ def train_controller(
                 if mutant_fitness > best_fitness:
                     best_fitness = mutant_fitness
                     best_params = mutant_params
-                    LOGGER.info(f"  Evolution: Candidate {candidate_idx} improved! R: {mutant_fitness:.1f}")
+                    cross_str = " (crossover)" if crossover_used else ""
+                    LOGGER.info(f"  Evolution: Candidate {candidate_idx}{cross_str} improved! R: {mutant_fitness:.1f}")
             
-            # Accept best if improved SIGNIFICANTLY (10% improvement threshold)
-            # This prevents accepting tiny improvements that destabilize training
-            original_fitness = stats['episode_return']
-            improvement_ratio = best_fitness / max(abs(original_fitness), 1.0)
+            # Accept best if improved vs rolling average (more stable than single episode)
+            # Compare against rolling average if available, else use current episode
+            comparison_fitness = rolling_parent_fitness if rolling_parent_fitness > -float('inf') else current_episode_fitness
+            improvement_ratio = best_fitness / max(abs(comparison_fitness), 1.0)
             meets_threshold = improvement_ratio >= config.fitness_improvement_threshold
             
             if best_params is not state.params and meets_threshold:
                 state.params = best_params
-                LOGGER.info(f"  Evolution: Accepted mutant with R: {best_fitness:.1f} ({improvement_ratio:.1%} improvement)")
+                
+                # ADD TO ELITE ARCHIVE (AS Rocketry-inspired population diversity)
+                added_to_elite = state.update_elite_archive(best_fitness, best_params)
+                elite_str = " [added to elite archive]" if added_to_elite else ""
+                
+                LOGGER.info(f"  Evolution: Accepted mutant with R: {best_fitness:.1f} ({improvement_ratio:.1%} vs rolling avg){elite_str}")
                 
                 # RESEARCH-BASED FIX: Activate post-evolution cooldown
                 # This uses reduced PPO epochs and learning rate for the next N episodes
@@ -1090,6 +1283,9 @@ def train_controller(
                     state.opt_state = new_opt_state
             elif best_params is not state.params:
                 LOGGER.info(f"  Evolution: Rejected mutant (improvement {improvement_ratio:.1%} < threshold {config.fitness_improvement_threshold:.0%})")
+        
+        # Update rolling parent fitness for next comparison
+        state.update_parent_fitness(stats['episode_return'])
         
         # Decrement cooldown counter each episode
         if state.post_evolution_cooldown_counter > 0:

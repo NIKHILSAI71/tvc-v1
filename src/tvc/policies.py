@@ -42,7 +42,7 @@ class PolicyConfig:
     hidden_dims: Tuple[int, ...] = (512, 256)  # Larger network for complex behaviors
     gru_hidden_dim: int = 256  # More temporal memory for smooth control
     activation: Callable[[jnp.ndarray], jnp.ndarray] = nn.silu
-    log_std_init: float = -1.2
+    log_std_init: float = -2.0  # Reduced from -1.2: start with small exploration to prevent oscillation
     log_std_min: float = -4.0
     log_std_max: float = 0.0
     dropout_rate: float = 0.0
@@ -244,3 +244,100 @@ def mutate_parameters(rng, variables, scale=0.02, mutation_prob=0.8):
         mutation = jnp.where(mutation_mask, noise * adaptive_scale, 0.0)
         mutated_leaves.append(leaf + mutation)
     return cast(Variables, jax.tree_util.tree_unflatten(tree_def, mutated_leaves))
+
+
+def add_parameter_noise(
+    rng: PRNGKey,
+    variables: Variables,
+    scale: float = 0.005,
+) -> Variables:
+    """Add small noise to parameters for exploration during rollouts.
+    
+    Unlike mutation, this is meant to be temporary noise added during
+    action selection to encourage exploration of the policy space.
+    
+    Reference: "Parameter Space Noise for Exploration" (Plappert et al., 2017)
+    
+    Args:
+        rng: JAX random key
+        variables: Policy parameters
+        scale: Noise scale (typically 0.001 - 0.01)
+    
+    Returns:
+        Noisy parameters (use for action selection only, not training)
+    """
+    leaves, tree_def = jax.tree_util.tree_flatten(variables)
+    rng_keys = jax.random.split(rng, num=len(leaves))
+    
+    noisy_leaves = []
+    for leaf, key in zip(leaves, rng_keys):
+        noise = jax.random.normal(key, shape=leaf.shape, dtype=leaf.dtype) * scale
+        noisy_leaves.append(leaf + noise)
+    
+    return cast(Variables, jax.tree_util.tree_unflatten(tree_def, noisy_leaves))
+
+
+def crossover_parameters(
+    rng: PRNGKey,
+    parent1: Variables,
+    parent2: Variables,
+    crossover_rate: float = 0.5,
+) -> Variables:
+    """Uniform crossover between two parameter sets.
+    
+    Creates a child by randomly selecting each weight from either parent.
+    This enables genetic diversity when combined with an elite archive.
+    
+    Reference: "Neuroevolution Strategies for Episodic Reinforcement Learning"
+    
+    Args:
+        rng: JAX random key
+        parent1: First parent parameters
+        parent2: Second parent parameters
+        crossover_rate: Probability of selecting from parent2 (0.5 = uniform)
+    
+    Returns:
+        Child parameters with mixed genes from both parents
+    """
+    leaves1, tree_def = jax.tree_util.tree_flatten(parent1)
+    leaves2, _ = jax.tree_util.tree_flatten(parent2)
+    rng_keys = jax.random.split(rng, num=len(leaves1))
+    
+    child_leaves = []
+    for leaf1, leaf2, key in zip(leaves1, leaves2, rng_keys):
+        # Per-weight crossover mask
+        mask = jax.random.uniform(key, shape=leaf1.shape) < crossover_rate
+        child = jnp.where(mask, leaf2, leaf1)
+        child_leaves.append(child)
+    
+    return cast(Variables, jax.tree_util.tree_unflatten(tree_def, child_leaves))
+
+
+def blend_parameters(
+    parent1: Variables,
+    parent2: Variables,
+    alpha: float = 0.5,
+) -> Variables:
+    """Arithmetic blend between two parameter sets.
+    
+    Creates a child via linear interpolation: child = alpha * parent1 + (1-alpha) * parent2
+    Smoother than crossover, good for fine-tuning near optima.
+    
+    Args:
+        parent1: First parent parameters
+        parent2: Second parent parameters
+        alpha: Blend factor (0.5 = average, 0.8 = mostly parent1)
+    
+    Returns:
+        Blended child parameters
+    """
+    leaves1, tree_def = jax.tree_util.tree_flatten(parent1)
+    leaves2, _ = jax.tree_util.tree_flatten(parent2)
+    
+    blended_leaves = [
+        alpha * l1 + (1 - alpha) * l2 
+        for l1, l2 in zip(leaves1, leaves2)
+    ]
+    
+    return cast(Variables, jax.tree_util.tree_unflatten(tree_def, blended_leaves))
+

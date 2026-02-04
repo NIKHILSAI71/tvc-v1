@@ -283,12 +283,12 @@ class TvcEnv:
 
         # Action smoothing for position commands
         # Helps filter high-frequency noise while maintaining responsiveness
-        # TUNING: Higher alpha = more responsive to policy commands
-        # Too low prevents learning; too high causes jitter
-        alpha = 0.7
+        # TUNING: alpha=0.5 balances responsiveness with stability
+        # 0.3 prevented learning (too filtered), 0.7 caused oscillation (too responsive)
+        alpha = 0.5
         self._smoothed_action[0] = alpha * action[0] + (1.0 - alpha) * self._smoothed_action[0]  # gimbal_x
         self._smoothed_action[1] = alpha * action[1] + (1.0 - alpha) * self._smoothed_action[1]  # gimbal_y
-        self._smoothed_action[2] = 0.5 * action[2] + 0.5 * self._smoothed_action[2]  # thrust (moderate smooth)
+        self._smoothed_action[2] = 0.4 * action[2] + 0.6 * self._smoothed_action[2]  # thrust (smoother for stability)
         
         smoothed_action = self._smoothed_action.copy()
 
