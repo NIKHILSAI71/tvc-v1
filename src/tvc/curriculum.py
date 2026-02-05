@@ -44,7 +44,7 @@ def build_curriculum() -> List[CurriculumStage]:
     # This prevents the model from learning to "fall with style"
     # ============================================================
     hover_stage = CurriculumStage(
-        name="3m Hover",
+        name="hover_stabilization",  # BUG-003 FIX: Consistent with env.py stage checks
         episodes=400,
         target_position=(0.0, 0.0, 3.0),
         target_orientation=(1.0, 0.0, 0.0, 0.0),

@@ -3,7 +3,7 @@ Module: training
 Purpose: Enhanced Recurrent PPO + Evolution training for 3D TVC.
 Complexity: Time O(Epochs * Steps) | Space O(Buffer_Size)
 Dependencies: jax, mujoco, optax
-Last Updated: 2026-01-03
+Last Updated: 2026-02-05
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import math
 import pickle
 import sys
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace as dataclass_replace  # BUG-012 FIX: Import replace at module level
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -294,11 +294,12 @@ class TrainingState:
             self.elite_archive.pop()
         
         # Insert in sorted position (descending by fitness)
-        insert_idx = 0
+        # BUG-013 FIX: Insert AT position where fitness > existing fitness
+        insert_idx = len(self.elite_archive)  # Default: append at end
         for i, (f, _) in enumerate(self.elite_archive):
             if fitness > f:
+                insert_idx = i
                 break
-            insert_idx = i + 1
         self.elite_archive.insert(insert_idx, (fitness, copy.deepcopy(params)))
         return True
     
@@ -340,6 +341,7 @@ class TrainingConfig:
     entropy_coef: float = 0.05  # Higher for pure PPO exploration
     entropy_coef_decay: float = 0.9998  # Very slow decay for longer exploration
     value_coef: float = 0.5
+    policy_loss_coef: float = 1.0  # BUG-014: Coefficient for actor loss (1.0 = normal, 0.1 = value pretraining)
     weight_decay: float = 1e-5
     
     # Stability Constants (Refactored from hardcoded values)
@@ -733,8 +735,8 @@ def _ppo_update(
     
     # Update return RMS and normalize returns for value function targets
     # This prevents the value loss from exploding when returns are in the thousands
-    state.return_rms.normalize(np.asarray(returns), update_stats=True)
-    norm_returns = (returns - state.return_rms.mean) / (np.sqrt(state.return_rms.m2 / max(state.return_rms.count, 1.0)) + 1e-8)
+    # BUG-002 FIX: Use normalize() output directly instead of redundant manual computation
+    norm_returns = state.return_rms.normalize(np.asarray(returns), update_stats=True)
     norm_returns = jnp.clip(norm_returns, -config.norm_return_clip, config.norm_return_clip)
 
     # Normalize advantages
@@ -821,7 +823,8 @@ def _ppo_update(
         log_std_clipped = jnp.clip(log_std, config.log_std_clip_min, config.log_std_clip_max)
         entropy = jnp.mean(jnp.sum(log_std_clipped + 0.5 * jnp.log(2.0 * jnp.pi * jnp.e), axis=-1))
         
-        total_loss = actor_loss + config.value_coef * value_loss - current_entropy_coef * entropy
+        # BUG-014: Apply policy_loss_coef for value pretraining
+        total_loss = config.policy_loss_coef * actor_loss + config.value_coef * value_loss - current_entropy_coef * entropy
         
         # KL
         approx_kl = jnp.mean(old_log_probs - new_log_probs)
@@ -1015,7 +1018,12 @@ def train_controller(
             gru_dim = config.policy_config.gru_hidden_dim
             sample_hidden = jnp.zeros((1, gru_dim))
             
-            current_fitness = stats['episode_return']
+            # BUG-008 FIX: Evaluate current params properly before mutations
+            # Use average of recent fitness instead of single stochastic rollout
+            if len(state.recent_parent_fitness) >= 3:
+                current_fitness = state.get_rolling_parent_fitness()
+            else:
+                current_fitness = stats['episode_return']
             best_params = state.params
             best_fitness = current_fitness
             
@@ -1077,19 +1085,27 @@ def train_controller(
         # This stabilizes advantage estimates before actor learning
         # ============================================================
         elif state.update_step < config.value_pretrain_updates:
-            # Value-only update: scale down actor loss, boost value loss
-            value_pretrain_factor = 0.1  # Reduce actor influence
-            # Pass to ppo_update (modify entropy_coef as proxy)
+            # BUG-014 FIX: True value pretraining - scale down actor loss, not just entropy
+            # Create config with reduced actor loss coefficient
+            value_pretrain_config = dataclass_replace(
+                config,
+                policy_loss_coef=0.1,  # Reduce actor influence during value pretraining
+            )
             state, metrics = _ppo_update(
-                state, batch, optimizer, funcs, config, 
+                state, batch, optimizer, funcs, value_pretrain_config, 
                 entropy_coef * 0.1  # Low entropy during value pretraining
             )
             if episode % 10 == 0:
                 LOGGER.info(f"  [Value Pretrain {state.update_step}/{config.value_pretrain_updates}]")
         elif state.post_evolution_cooldown_counter > 0:
-            # POST-EVOLUTION COOLDOWN: Use reduced epochs to prevent loss spikes
+            # POST-EVOLUTION COOLDOWN: Use reduced epochs AND LR to prevent loss spikes
+            # BUG-009 FIX: Actually apply post_evolution_lr_scale
             # This gives Adam optimizer time to rebuild moment estimates for mutated weights
-            cooldown_config = dataclasses.replace(config, num_epochs=config.post_evolution_epochs)
+            cooldown_config = dataclass_replace(
+                config, 
+                num_epochs=config.post_evolution_epochs,
+                learning_rate=config.learning_rate * config.post_evolution_lr_scale  # BUG-009: Apply LR scaling
+            )
             state, metrics = _ppo_update(state, batch, optimizer, funcs, cooldown_config, entropy_coef * 0.5)
             if episode % 5 == 0:
                 LOGGER.info(f"  [Post-Evolution Cooldown: {state.post_evolution_cooldown_counter} eps remaining, using {config.post_evolution_epochs} PPO epochs]")
@@ -1099,7 +1115,9 @@ def train_controller(
         
         # Update metrics
         state.moving_avg_return = (1.0 - state.moving_avg_alpha) * state.moving_avg_return + state.moving_avg_alpha * stats['episode_return']
-        if stats['episode_return'] > state.best_return:
+        # BUG-001 FIX: Track if this is a new best BEFORE updating state
+        is_new_best = stats['episode_return'] > state.best_return
+        if is_new_best:
             state.best_return = float(stats['episode_return'])
         
         # Track successes
@@ -1144,7 +1162,7 @@ def train_controller(
         # Advance Curriculum
         # STRICTER GATE: 80% SR + consecutive successes + min episodes
         previous_stage_index = state.stage_index
-        consecutive_success_req = 5  # Must win 5 in a row
+        consecutive_success_req = stage.success_episodes  # BUG-004 FIX: Use stage-specific requirement
         recent_streak = sum(1 for s in state.recent_successes[-consecutive_success_req:] if s) if state.recent_successes else 0
         has_streak = recent_streak >= consecutive_success_req
         
@@ -1300,8 +1318,8 @@ def train_controller(
         if output_dir and episode > 0 and episode % config.checkpoint_interval == 0:
             save_checkpoint(state, config, episode, output_dir, is_best=False, training_logs=state.history)
         
-        # Save best model
-        if config.save_best and stats['episode_return'] > state.best_return:
+        # Save best model - BUG-001 FIX: Use is_new_best from earlier check
+        if config.save_best and is_new_best:
             if output_dir:
                 save_checkpoint(state, config, episode, output_dir, is_best=True, training_logs=state.history)
         

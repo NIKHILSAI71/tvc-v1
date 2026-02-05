@@ -75,11 +75,9 @@ class TvcEnv:
         self._prev_action = np.zeros(3, dtype=np.float64)
         
         # Enhanced Action Smoothing (Low-pass filter)
-        # alpha=0.15 heavily smooths the control signal, filtering out high-frequency
-        # jitter from the stochastic policy. This prevents the "shaking" seen in early training.
+        # BUG-006 FIX: Use single smoothing pass in step(), removed duplicate alpha
         # Real actuators behave like low-pass filters anyway.
         self._smoothed_action = np.zeros(3, dtype=np.float64)
-        self._action_smoothing_alpha = 0.15
         
         # Actuator delay buffer (for realistic hardware simulation)
         self._actuator_delay_steps = actuator_delay_steps
@@ -170,7 +168,9 @@ class TvcEnv:
 
         # Only enable after Stage 2 (lateral_translation) to allow stable initial learning
         stage_name = self._stage_config.get("stage_name", "hover_stabilization")
-        enable_randomization = self._domain_randomization and stage_name not in ["hover_stabilization", "lateral_translation"]
+        # BUG-010 FIX: Flexible hover stage detection
+        is_hover_stage = "hover" in stage_name.lower()
+        enable_randomization = self._domain_randomization and not is_hover_stage
         
         # Domain randomization: Randomize physics parameters for robustness
         if enable_randomization:
@@ -234,7 +234,9 @@ class TvcEnv:
         
         # STRENGTHENED: For hover stabilization, add significant offset to force correction
         # This prevents "Null-Op Success" where agent just spawns at target and wins
-        if getattr(self, "_stage_config", {}).get("stage_name") == "hover_stabilization":
+        # BUG-010 FIX: Flexible hover stage detection
+        is_hover_stage = "hover" in self._stage_config.get("stage_name", "").lower()
+        if is_hover_stage:
              # ±0.2m initial error - ensures success is achievable with 1.2m tolerance
              pos_noise = self._rng.uniform(-0.2, 0.2, 3) 
              # Ensure Z doesn't go below safety margins (start at 8m, so -0.8 is fine)
@@ -356,14 +358,12 @@ class TvcEnv:
         # CRITICAL: Include gimbal angles and velocities for feedback control
         # qpos layout: [0:3]=pos, [3:7]=quat, [7]=tvc_x, [8]=tvc_y
         # qvel layout: [0:3]=vel, [3:6]=omega, [6]=tvc_x_vel, [7]=tvc_y_vel
-        # Sim2Real: Add Sensor Bias to Position and Velocity
-        # The agent sees Biased + Noisy data, but reward is based on Truth
-        biased_pos = self.data.qpos[0:3] + self._sensor_bias[0:3]
-        biased_vel = self.data.qvel[0:3] + self._sensor_bias[3:6]
-
+        # BUG-005 FIX: Use ground truth position/velocity for observations
+        # This maintains consistency with the reward function which also uses ground truth.
+        # Sensor bias for sim2real can be added later as a separate feature with proper handling.
         state_np = np.concatenate([
-            biased_pos,   # Vehicle position (3)
-            biased_vel,   # Vehicle velocity (3)
+            self.data.qpos[0:3],   # Vehicle position (3) - ground truth
+            self.data.qvel[0:3],   # Vehicle velocity (3) - ground truth
             self.data.qpos[3:7],   # Vehicle quaternion (4)
             self.data.qvel[3:6],   # Vehicle angular velocity (3)
             self.data.qpos[7:9],
@@ -498,7 +498,9 @@ class TvcEnv:
         hover_precision_reward = 0.0
         
         # HOVER STAGE REWARDS (Stage 0: 3m Hover)
-        if "Hover" in stage_name or target_altitude >= 2.5:
+        # BUG-010 FIX: Flexible hover stage detection
+        is_hover_stage = "hover" in stage_name.lower()
+        if is_hover_stage or target_altitude >= 2.5:
             # SIMPLIFIED: Single continuous hover precision reward
             # Avoids step functions that cause high variance in value learning
             hover_precision_reward = 15.0 / (1.0 + pos_error + vel_error)
@@ -536,23 +538,25 @@ class TvcEnv:
         # ============================================================
         gimbal_angles = self.data.qpos[7:9]  # Current gimbal position [pitch, yaw]
         
-        # Approximate tilt from quaternion (small angle approximation)
-        # roll ≈ 2*qx (tilt around X axis)
-        # pitch ≈ 2*qy (tilt around Y axis)
-        roll_tilt = 2.0 * quat[1]   # Tilt around X
-        pitch_tilt = 2.0 * quat[2]  # Tilt around Y
-        
-        # Correct gimbal response: gimbal should oppose tilt
-        # If tilting forward (positive pitch), gimbal X should deflect negatively
-        # Scale factor matches the expected gimbal response magnitude
-        correct_gimbal_x = -pitch_tilt * 0.4
-        correct_gimbal_y = roll_tilt * 0.4
-        
-        # Reward for correct gimbal usage (lower error = higher reward)
-        gimbal_x_error = abs(gimbal_angles[0] - correct_gimbal_x)
-        gimbal_y_error = abs(gimbal_angles[1] - correct_gimbal_y)
-        gimbal_agreement = 1.0 / (1.0 + gimbal_x_error + gimbal_y_error)
-        gimbal_control_reward = 8.0 * gimbal_agreement  # Max ~8 when perfect
+        # BUG-011 FIX: Only apply small-angle approximation when tilt is small enough
+        # The approximation roll ≈ 2*qx, pitch ≈ 2*qy is valid for ~<15 degrees
+        if orient_alignment > 0.95:  # Within ~18 degrees, approximation is valid
+            roll_tilt = 2.0 * quat[1]   # Tilt around X
+            pitch_tilt = 2.0 * quat[2]  # Tilt around Y
+            
+            # Correct gimbal response: gimbal should oppose tilt
+            correct_gimbal_x = -pitch_tilt * 0.4
+            correct_gimbal_y = roll_tilt * 0.4
+            
+            # Reward for correct gimbal usage (lower error = higher reward)
+            gimbal_x_error = abs(gimbal_angles[0] - correct_gimbal_x)
+            gimbal_y_error = abs(gimbal_angles[1] - correct_gimbal_y)
+            gimbal_agreement = 1.0 / (1.0 + gimbal_x_error + gimbal_y_error)
+            gimbal_control_reward = 8.0 * gimbal_agreement  # Max ~8 when perfect
+        else:
+            # For large tilts, just reward centering the gimbal (recovery mode)
+            gimbal_center_error = np.linalg.norm(gimbal_angles)
+            gimbal_control_reward = 4.0 / (1.0 + gimbal_center_error)
 
         # Combined reward (dense, shaped, scales ~0-80 per step)
         reward = (
@@ -635,7 +639,8 @@ class TvcEnv:
         
         # Early success termination - achieves goal state
         # CRITICAL: Disabled for hover_stabilization to force duration holding
-        is_hover_stage = self._stage_config.get("stage_name") == "hover_stabilization"
+        # BUG-010 FIX: Flexible hover stage detection
+        is_hover_stage = "hover" in self._stage_config.get("stage_name", "").lower()
         
         if (not is_hover_stage and  # Only allow early finish for non-hover stages (e.g. landing)
             pos_error < self._stage_config["position_tolerance"] * 0.8 and  # Within 80% of tolerance
