@@ -363,8 +363,8 @@ class TrainingConfig:
     evolution_candidates: int = 4  # Number of mutants to evaluate per evolution step
     evolution_eval_episodes: int = 5  # Increased from 3 for smoother fitness estimates
     fitness_episodes: int = 5  # Increased for stability
-    evolution_warmup_episodes: int = 150  # Longer warmup for PPO to establish good gradients
-    evolution_stage_lockout: int = 75  # Longer lockout after stage transition
+    evolution_warmup_episodes: int = 30  # Reduced: PPO warmup before evolution starts
+    evolution_stage_lockout: int = 30  # Reduced: Lockout after stage transition
     
     # RESEARCH-BASED: Evolution stability parameters
     mutation_scale: float = 0.02  # Reduced from 0.05 for RNN stability
@@ -384,7 +384,7 @@ class TrainingConfig:
     evolution_enable_threshold: float = 0.70  # Enable Evolution at 70% success rate
     
     # Value Pretraining - stabilizes advantage estimates from the start
-    value_pretrain_updates: int = 100  # Longer warmup for value function stability
+    value_pretrain_updates: int = 30  # Reduced: Value function warmup before full PPO
     value_pretrain_coef: float = 1.0  # Higher coefficient during pretraining
     
     # Staged exploration - reset entropy on stage advancement
@@ -655,6 +655,10 @@ def _collect_rollout(
                 and current_steps >= min_survival  # Must actually hover, not just start near
             )
             
+            # Track errors for metrics
+            final_pos_error = pos_error
+            final_vel_error = vel_error
+            final_episode_length = current_steps
             episode_successes.append(episode_success)
             episode_returns.append(current_episode_return)
             current_episode_return = 0.0
@@ -712,6 +716,9 @@ def _collect_rollout(
         "episode_success": any(episode_successes) if episode_successes else False,
         "rollout_success_rate": sum(episode_successes)/len(episode_successes) if episode_successes else 0.0,
         "steps_per_second": steps_per_second,
+        "pos_error": final_pos_error if 'final_pos_error' in dir() else 0.0,
+        "vel_error": final_vel_error if 'final_vel_error' in dir() else 0.0,
+        "episode_length": final_episode_length if 'final_episode_length' in dir() else config.rollout_length,
     }
     
     return batch, stats
@@ -1154,10 +1161,22 @@ def train_controller(
         # Phase indicator for logging
         phase_str = f"P{state.learning_phase}"
         
-        # Enhanced logging with phase indicator
+        # Enhanced logging with detailed metrics
         success_emoji = "✓" if stats['episode_success'] else "✗"
-        if episode % 10 == 0:
-            LOGGER.info(f"Ep {episode:4d} | {phase_str} | R: {stats['episode_return']:7.1f} | Loss: {metrics['loss']:6.2f} | SR: {rolling_sr*100:4.1f}% | {stage.name} | {success_emoji}")
+        
+        # Log every episode with basic info
+        LOGGER.info(f"Ep {episode:4d} | {phase_str} | R: {stats['episode_return']:8.1f} | Steps: {stats.get('episode_length', 0):3.0f} | SR: {rolling_sr*100:4.1f}% | {stage.name} | {success_emoji}")
+        
+        # Detailed metrics every 5 episodes
+        if episode % 5 == 0:
+            actor_loss = metrics.get('actor_loss', 0.0)
+            value_loss = metrics.get('value_loss', 0.0)
+            entropy = metrics.get('entropy', 0.0)
+            kl = metrics.get('kl', 0.0)
+            pos_err = stats.get('pos_error', 0.0)
+            vel_err = stats.get('vel_error', 0.0)
+            LOGGER.info(f"         └─ Loss: {metrics['loss']:7.3f} | Actor: {actor_loss:6.3f} | Value: {value_loss:6.3f} | Ent: {entropy:5.2f} | KL: {kl:.4f}")
+            LOGGER.info(f"         └─ PosErr: {pos_err:5.2f}m | VelErr: {vel_err:5.2f}m/s | Best: {state.best_return:8.1f} | Updates: {state.update_step}")
         
         # Advance Curriculum
         # STRICTER GATE: 80% SR + consecutive successes + min episodes
@@ -1327,6 +1346,13 @@ def train_controller(
     if output_dir:
         LOGGER.info("Saving final checkpoint...")
         save_checkpoint(state, config, total_episodes, output_dir, is_best=False, training_logs=state.history)
+    
+    # Cleanup viewer to prevent GLFW errors
+    if viewer is not None:
+        try:
+            viewer.close()
+        except Exception as e:
+            LOGGER.debug(f"Viewer cleanup: {e}")
     
     return state
 
