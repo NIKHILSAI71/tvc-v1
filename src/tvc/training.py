@@ -356,7 +356,7 @@ class TrainingConfig:
     ratio_clip_limit: float = 10.0
     return_clip_limit: float = 1e4
     norm_return_clip: float = 10.0
-    target_kl: float = 0.02  # KL threshold for early stopping
+    target_kl: float = 0.5  # Increased: KL threshold for early stopping (was 0.02, observed KL ~1.0)
     # STAGED LEARNING: Evolution disabled by default, enabled automatically at 70% SR
     use_evolution: bool = False  # Enabled by progression system
     evolution_interval: int = 50  # Less frequent evolution to allow PPO to converge
@@ -384,7 +384,7 @@ class TrainingConfig:
     evolution_enable_threshold: float = 0.70  # Enable Evolution at 70% success rate
     
     # Value Pretraining - stabilizes advantage estimates from the start
-    value_pretrain_updates: int = 30  # Reduced: Value function warmup before full PPO
+    value_pretrain_updates: int = 20  # Reduced: Value function warmup before full PPO
     value_pretrain_coef: float = 1.0  # Higher coefficient during pretraining
     
     # Staged exploration - reset entropy on stage advancement
@@ -399,7 +399,7 @@ class TrainingConfig:
     save_best: bool = True  # Save best model based on return
     
     # NEUROEVOLUTION ENHANCEMENTS (AS Rocketry-inspired)
-    neuroevo_warmup_episodes: int = 30   # Pure evolution before PPO kicks in
+    neuroevo_warmup_episodes: int = 10   # Reduced: Pure evolution before PPO kicks in
     neuroevo_warmup_mutations: int = 8   # Mutations per episode during warmup
     elite_archive_size: int = 5          # Top K policies for diversity
     use_parameter_noise: bool = True     # Add noise during rollouts for exploration
@@ -838,14 +838,17 @@ def _ppo_update(
         
         return total_loss, (actor_loss, value_loss, entropy, approx_kl)
 
-    # Optimization Loop
+    # Optimization Loop - FIXED: Always do at least one update per epoch
     params = state.params
     opt_state = state.opt_state
     
-    kl_exceeded = False  # Track KL for early stopping
+    updates_this_call = 0  # Track updates in this PPO call
+    final_kl = 0.0
+    kl_exceeded = False
+    
     for epoch in range(config.num_epochs):
-        if kl_exceeded:
-            break  # Stop early if KL threshold exceeded
+        if kl_exceeded and epoch > 0:  # Allow at least one full epoch
+            break
         
         # Shuffle SEQUENCES
         inds = np.arange(num_sequences)
@@ -864,26 +867,29 @@ def _ppo_update(
                 LOGGER.warning("Skipping update due to NaN/Inf loss")
                 continue
             
-            # KL early stopping - prevent catastrophic policy updates
-            approx_kl = float(aux[3])
-            if approx_kl > config.target_kl:
-                LOGGER.debug(f"KL early stop: {approx_kl:.4f} > {config.target_kl}")
-                kl_exceeded = True
-                break
-            
+            # ALWAYS do the update first
             updates, opt_state = optimizer.update(grads, opt_state, params)
             params = optax.apply_updates(params, updates)
-            state.update_step += 1 # Increment update step!
+            updates_this_call += 1
+            state.update_step += 1
+            
+            # THEN check KL for early stopping on future epochs
+            final_kl = float(aux[3])
+            if final_kl > config.target_kl:
+                LOGGER.debug(f"KL exceeded: {final_kl:.4f} > {config.target_kl}")
+                kl_exceeded = True
+                # Don't break mid-epoch, finish this epoch
 
     state.params = params
     state.opt_state = opt_state
     
     metrics = {
-        "loss": float(loss),
-        "actor_loss": float(aux[0]),
-        "value_loss": float(aux[1]),
-        "entropy": float(aux[2]),
-        "kl": float(aux[3]),
+        "loss": float(loss) if 'loss' in dir() else 0.0,
+        "actor_loss": float(aux[0]) if 'aux' in dir() else 0.0,
+        "value_loss": float(aux[1]) if 'aux' in dir() else 0.0,
+        "entropy": float(aux[2]) if 'aux' in dir() else 0.0,
+        "kl": final_kl,
+        "updates_this_ep": updates_this_call,
     }
     return state, metrics
 
@@ -1176,7 +1182,8 @@ def train_controller(
             pos_err = stats.get('pos_error', 0.0)
             vel_err = stats.get('vel_error', 0.0)
             LOGGER.info(f"         └─ Loss: {metrics['loss']:7.3f} | Actor: {actor_loss:6.3f} | Value: {value_loss:6.3f} | Ent: {entropy:5.2f} | KL: {kl:.4f}")
-            LOGGER.info(f"         └─ PosErr: {pos_err:5.2f}m | VelErr: {vel_err:5.2f}m/s | Best: {state.best_return:8.1f} | Updates: {state.update_step}")
+            updates_this_ep = metrics.get('updates_this_ep', 0)
+            LOGGER.info(f"         └─ PosErr: {pos_err:5.2f}m | VelErr: {vel_err:5.2f}m/s | Best: {state.best_return:8.1f} | Updates: {state.update_step} (+{updates_this_ep})")
         
         # Advance Curriculum
         # STRICTER GATE: 80% SR + consecutive successes + min episodes
