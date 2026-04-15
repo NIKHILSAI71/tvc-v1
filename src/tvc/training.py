@@ -12,7 +12,11 @@ import json
 import logging
 import pickle
 import time
-from dataclasses import dataclass, field, replace as dataclass_replace  # BUG-012 FIX: Import replace at module level
+from dataclasses import (
+    dataclass,
+    field,
+    replace as dataclass_replace,
+)  # BUG-012 FIX: Import replace at module level
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -35,9 +39,10 @@ LOGGER = logging.getLogger(__name__)
 # CHECKPOINTING: Save and load training state
 # ============================================================
 
+
 def save_checkpoint(
     state: "TrainingState",
-    config: "TrainingConfig", 
+    config: "TrainingConfig",
     episode: int,
     output_dir: Path,
     is_best: bool = False,
@@ -45,7 +50,7 @@ def save_checkpoint(
 ) -> Path:
     """
     Save training checkpoint with model, optimizer, and logs.
-    
+
     Structure:
         data/checkpoints/
             YYYYMMDD_HHMMSS_ep{episode}/
@@ -59,23 +64,22 @@ def save_checkpoint(
     checkpoint_name = f"{timestamp}_ep{episode:04d}"
     if is_best:
         checkpoint_name += "_best"
-    
+
     checkpoint_dir = output_dir / "checkpoints" / checkpoint_name
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # Save model parameters (JAX arrays -> numpy -> pickle)
     params_np = jax.tree_util.tree_map(np.array, state.params)
     with open(checkpoint_dir / "model_params.pkl", "wb") as f:
         pickle.dump(params_np, f)
-    
+
     # Save optimizer state
     opt_state_np = jax.tree_util.tree_map(
-        lambda x: np.array(x) if isinstance(x, jnp.ndarray) else x, 
-        state.opt_state
+        lambda x: np.array(x) if isinstance(x, jnp.ndarray) else x, state.opt_state
     )
     with open(checkpoint_dir / "optimizer_state.pkl", "wb") as f:
         pickle.dump(opt_state_np, f)
-    
+
     # Save training state (non-JAX fields)
     training_state_dict = {
         "update_step": state.update_step,
@@ -94,13 +98,21 @@ def save_checkpoint(
         },
         "return_rms": {
             "count": float(state.return_rms.count),
-            "mean": state.return_rms.mean.tolist() if hasattr(state.return_rms.mean, 'tolist') else [],
-            "m2": state.return_rms.m2.tolist() if hasattr(state.return_rms.m2, 'tolist') else [],
+            "mean": (
+                state.return_rms.mean.tolist()
+                if hasattr(state.return_rms.mean, "tolist")
+                else []
+            ),
+            "m2": (
+                state.return_rms.m2.tolist()
+                if hasattr(state.return_rms.m2, "tolist")
+                else []
+            ),
         },
     }
     with open(checkpoint_dir / "training_state.json", "w") as f:
         json.dump(training_state_dict, f, indent=2)
-    
+
     # Save config
     config_dict = {
         "gamma": config.gamma,
@@ -120,42 +132,43 @@ def save_checkpoint(
     }
     with open(checkpoint_dir / "config.json", "w") as f:
         json.dump(config_dict, f, indent=2)
-    
+
     # Save training logs
     if training_logs:
         with open(checkpoint_dir / "training_logs.json", "w") as f:
             json.dump(training_logs, f, indent=2)
-    
+
     LOGGER.info(f"Checkpoint saved: {checkpoint_dir}")
     return checkpoint_dir
 
 
-def load_checkpoint(checkpoint_dir: Path, config: "TrainingConfig") -> Tuple["TrainingState", List[Dict]]:
+def load_checkpoint(
+    checkpoint_dir: Path, config: "TrainingConfig"
+) -> Tuple["TrainingState", List[Dict]]:
     """
     Load training checkpoint.
-    
+
     Returns:
         Tuple of (TrainingState, training_logs)
     """
     LOGGER.info(f"Loading checkpoint from: {checkpoint_dir}")
-    
+
     # Load model parameters
     with open(checkpoint_dir / "model_params.pkl", "rb") as f:
         params_np = pickle.load(f)
     params = jax.tree_util.tree_map(jnp.array, params_np)
-    
+
     # Load optimizer state
     with open(checkpoint_dir / "optimizer_state.pkl", "rb") as f:
         opt_state_np = pickle.load(f)
     opt_state = jax.tree_util.tree_map(
-        lambda x: jnp.array(x) if isinstance(x, np.ndarray) else x,
-        opt_state_np
+        lambda x: jnp.array(x) if isinstance(x, np.ndarray) else x, opt_state_np
     )
-    
+
     # Load training state
     with open(checkpoint_dir / "training_state.json", "r") as f:
         ts = json.load(f)
-    
+
     # Reconstruct normalizers
     obs_rms = RunningNormalizer(
         count=ts["obs_rms"]["count"],
@@ -164,10 +177,18 @@ def load_checkpoint(checkpoint_dir: Path, config: "TrainingConfig") -> Tuple["Tr
     )
     return_rms = RunningNormalizer(
         count=ts["return_rms"]["count"],
-        mean=np.array(ts["return_rms"]["mean"], dtype=np.float32) if ts["return_rms"]["mean"] else np.zeros((0,), dtype=np.float32),
-        m2=np.array(ts["return_rms"]["m2"], dtype=np.float32) if ts["return_rms"]["m2"] else np.zeros((0,), dtype=np.float32),
+        mean=(
+            np.array(ts["return_rms"]["mean"], dtype=np.float32)
+            if ts["return_rms"]["mean"]
+            else np.zeros((0,), dtype=np.float32)
+        ),
+        m2=(
+            np.array(ts["return_rms"]["m2"], dtype=np.float32)
+            if ts["return_rms"]["m2"]
+            else np.zeros((0,), dtype=np.float32)
+        ),
     )
-    
+
     # Create training state
     rng = jax.random.PRNGKey(42)  # Will be re-seeded
     state = TrainingState(
@@ -186,21 +207,24 @@ def load_checkpoint(checkpoint_dir: Path, config: "TrainingConfig") -> Tuple["Tr
         stage_attempts=ts["stage_attempts"],
         recent_successes=ts["recent_successes"],
     )
-    
+
     # Load training logs
     logs_path = checkpoint_dir / "training_logs.json"
     training_logs = []
     if logs_path.exists():
         with open(logs_path, "r") as f:
             training_logs = json.load(f)
-    
-    LOGGER.info(f"Loaded: ep={ts['update_step']}, stage={ts['stage_index']}, best_R={ts['best_return']:.1f}")
+
+    LOGGER.info(
+        f"Loaded: ep={ts['update_step']}, stage={ts['stage_index']}, best_R={ts['best_return']:.1f}"
+    )
     return state, training_logs
 
 
 @dataclass
 class RunningNormalizer:
     """Welford's online normalization with stable updates."""
+
     count: float = 0.0
     mean: np.ndarray = field(default_factory=lambda: np.zeros((0,), dtype=np.float32))
     m2: np.ndarray = field(default_factory=lambda: np.zeros((0,), dtype=np.float32))
@@ -210,7 +234,9 @@ class RunningNormalizer:
         obs = np.asarray(observation, dtype=np.float32)
         return cls(count=1.0, mean=obs, m2=np.zeros_like(obs))
 
-    def normalize(self, observation: np.ndarray, update_stats: bool = True) -> jnp.ndarray:
+    def normalize(
+        self, observation: np.ndarray, update_stats: bool = True
+    ) -> jnp.ndarray:
         obs = np.asarray(observation, dtype=np.float32)
         if self.mean.size == 0 or self.mean.shape != obs.shape:
             self.count = 1.0
@@ -224,7 +250,7 @@ class RunningNormalizer:
             self.mean = self.mean + delta / self.count
             delta2 = obs - self.mean
             self.m2 = self.m2 + delta * delta2
-        
+
         variance = np.maximum(self.m2 / max(self.count, 1.0), 1e-4)
         std = np.sqrt(variance)
         normalized = (obs - self.mean) / (std + 1e-8)
@@ -235,13 +261,14 @@ class RunningNormalizer:
 @dataclass
 class TrainingState:
     """Recurrent PPO + Staged Learning training state.
-    
+
     Learning Phases:
         Phase 0: Neuroevolution Warmup - Pure evolution to find good starting weights
         Phase 1: Pure PPO (0-40% SR) - Learn basic hover control
         Phase 2: PPO + RAJS (40-70% SR) - Add heuristic guidance
         Phase 3: Full Hybrid (70%+ SR) - Add neuroevolution
     """
+
     params: Any
     opt_state: optax.OptState
     rng: jax.Array
@@ -261,24 +288,32 @@ class TrainingState:
     recent_successes: List[bool] = field(default_factory=list)
     rolling_window_size: int = 50
     post_evolution_cooldown_counter: int = 0
-    
+
     # STAGED LEARNING: Automatic progression based on success rate
-    learning_phase: int = 0           # 0=Neuroevo Warmup, 1=Pure PPO, 2=RAJS, 3=Full Hybrid
-    rajs_enabled: bool = False        # Enable RAJS at 40% SR
-    evolution_enabled: bool = False   # Enable Evolution at 70% SR
-    
+    learning_phase: int = 0  # 0=Neuroevo Warmup, 1=Pure PPO, 2=RAJS, 3=Full Hybrid
+    rajs_enabled: bool = False  # Enable RAJS at 40% SR
+    evolution_enabled: bool = False  # Enable Evolution at 70% SR
+
     # NEUROEVOLUTION ENHANCEMENTS (AS Rocketry-inspired)
-    elite_archive: List[Tuple[float, Any]] = field(default_factory=list)  # (fitness, params) sorted by fitness
-    elite_archive_max_size: int = 5   # Keep top K policies for diversity
-    recent_parent_fitness: List[float] = field(default_factory=list)  # Rolling fitness for comparison
+    elite_archive: List[Tuple[float, Any]] = field(
+        default_factory=list
+    )  # (fitness, params) sorted by fitness
+    elite_archive_max_size: int = 5  # Keep top K policies for diversity
+    recent_parent_fitness: List[float] = field(
+        default_factory=list
+    )  # Rolling fitness for comparison
     neuroevo_warmup_complete: bool = False  # Track if warmup phase is done
 
     def update_rolling_success(self, success: bool) -> float:
         self.recent_successes.append(success)
         if len(self.recent_successes) > self.rolling_window_size:
             self.recent_successes.pop(0)
-        return sum(self.recent_successes) / len(self.recent_successes) if self.recent_successes else 0.0
-    
+        return (
+            sum(self.recent_successes) / len(self.recent_successes)
+            if self.recent_successes
+            else 0.0
+        )
+
     def update_elite_archive(self, fitness: float, params: Any) -> bool:
         """Add to elite archive if fitness is good enough. Returns True if added."""
         # Don't add if archive is full and fitness is worse than worst elite
@@ -288,7 +323,7 @@ class TrainingState:
                 return False
             # Remove worst to make room
             self.elite_archive.pop()
-        
+
         # Insert in sorted position (descending by fitness)
         # BUG-013 FIX: Insert AT position where fitness > existing fitness
         insert_idx = len(self.elite_archive)  # Default: append at end
@@ -298,13 +333,13 @@ class TrainingState:
                 break
         self.elite_archive.insert(insert_idx, (fitness, copy.deepcopy(params)))
         return True
-    
+
     def get_rolling_parent_fitness(self) -> float:
         """Get average fitness over recent episodes for stable comparison."""
         if not self.recent_parent_fitness:
-            return -float('inf')
+            return -float("inf")
         return sum(self.recent_parent_fitness) / len(self.recent_parent_fitness)
-    
+
     def update_parent_fitness(self, fitness: float, window_size: int = 10):
         """Update rolling parent fitness for smoother evolution comparisons."""
         self.recent_parent_fitness.append(fitness)
@@ -315,31 +350,34 @@ class TrainingState:
 @dataclass(frozen=True)
 class TrainingConfig:
     """Configuration for Recurrent PPO."""
+
     gamma: float = 0.99
     lam: float = 0.95
     learning_rate: float = 5e-5  # Further reduced for better stability
     clip_epsilon: float = 0.1  # Tighter clipping for stability
-    
+
     # Environment settings
     dt: float = 0.02
     max_episode_steps: int = 300
     eval_max_steps: int = 500
-    
+
     # Sequence settings
     rollout_length: int = 3072  # Balanced rollout size for stable training
     sequence_length: int = 64  # Time horizon for GRU backprop
-    
+
     num_epochs: int = 4  # Reduced epochs for RNN safety
     minibatch_size: int = 32  # Number of sequences per batch
-    
+
     value_clip_epsilon: float = 0.2
     grad_clip_norm: float = 0.5  # Tighter clipping for RNN
     entropy_coef: float = 0.05  # Higher for pure PPO exploration
     entropy_coef_decay: float = 0.9998  # Very slow decay for longer exploration
     value_coef: float = 0.5
-    policy_loss_coef: float = 1.0  # BUG-014: Coefficient for actor loss (1.0 = normal, 0.1 = value pretraining)
+    policy_loss_coef: float = (
+        1.0  # BUG-014: Coefficient for actor loss (1.0 = normal, 0.1 = value pretraining)
+    )
     weight_decay: float = 1e-5
-    
+
     # Stability Constants (Refactored from hardcoded values)
     reward_clip_min: float = -100.0
     reward_clip_max: float = 100.0
@@ -352,7 +390,9 @@ class TrainingConfig:
     ratio_clip_limit: float = 10.0
     return_clip_limit: float = 1e4
     norm_return_clip: float = 10.0
-    target_kl: float = 0.5  # Increased: KL threshold for early stopping (was 0.02, observed KL ~1.0)
+    target_kl: float = (
+        0.5  # Increased: KL threshold for early stopping (was 0.02, observed KL ~1.0)
+    )
     # STAGED LEARNING: Evolution disabled by default, enabled automatically at 70% SR
     use_evolution: bool = False  # Enabled by progression system
     evolution_interval: int = 50  # Less frequent evolution to allow PPO to converge
@@ -361,12 +401,18 @@ class TrainingConfig:
     fitness_episodes: int = 5  # Increased for stability
     evolution_warmup_episodes: int = 30  # Reduced: PPO warmup before evolution starts
     evolution_stage_lockout: int = 30  # Reduced: Lockout after stage transition
-    
+
     # RESEARCH-BASED: Evolution stability parameters
     mutation_scale: float = 0.02  # Reduced from 0.05 for RNN stability
-    post_evolution_cooldown: int = 10  # Episodes to use reduced PPO epochs after evolution
-    post_evolution_epochs: int = 2  # Fewer PPO epochs during cooldown (prevents loss spikes)
-    fitness_improvement_threshold: float = 1.05  # Reduced to 5% - more responsive to improvements
+    post_evolution_cooldown: int = (
+        10  # Episodes to use reduced PPO epochs after evolution
+    )
+    post_evolution_epochs: int = (
+        2  # Fewer PPO epochs during cooldown (prevents loss spikes)
+    )
+    fitness_improvement_threshold: float = (
+        1.05  # Reduced to 5% - more responsive to improvements
+    )
     post_evolution_lr_scale: float = 0.3  # Scale LR down after evolution for warmup
 
     # STAGED LEARNING: RAJS disabled by default, enabled automatically at 40% SR
@@ -374,34 +420,38 @@ class TrainingConfig:
     rajs_initial_guide_steps: int = 60  # Reduced guidance when enabled
     rajs_annealing_rate: float = 0.995  # Faster decay
     rajs_adaptive: bool = True
-    
+
     # STAGED LEARNING: Automatic progression thresholds
-    rajs_enable_threshold: float = 0.40   # Enable RAJS at 40% success rate
+    rajs_enable_threshold: float = 0.40  # Enable RAJS at 40% success rate
     evolution_enable_threshold: float = 0.70  # Enable Evolution at 70% success rate
-    
+
     # Value Pretraining - stabilizes advantage estimates from the start
     value_pretrain_updates: int = 20  # Reduced: Value function warmup before full PPO
     value_pretrain_coef: float = 1.0  # Higher coefficient during pretraining
-    
+
     # Staged exploration - reset entropy on stage advancement
-    staged_exploration_reset: float = 0.7  # Reset entropy to this fraction of original on stage change
-    
+    staged_exploration_reset: float = (
+        0.7  # Reset entropy to this fraction of original on stage change
+    )
+
     # Value function stabilization (research-backed)
     value_loss_clip: float = 10.0  # Clip extreme value losses to prevent instability
-    soft_reset_momentum_keep: float = 0.5  # Keep 50% of momentum to prevent loss spikes after evolution
-    
+    soft_reset_momentum_keep: float = (
+        0.5  # Keep 50% of momentum to prevent loss spikes after evolution
+    )
+
     # Checkpointing
     checkpoint_interval: int = 50  # Save checkpoint every N episodes
     save_best: bool = True  # Save best model based on return
-    
+
     # NEUROEVOLUTION ENHANCEMENTS (AS Rocketry-inspired)
-    neuroevo_warmup_episodes: int = 10   # Reduced: Pure evolution before PPO kicks in
-    neuroevo_warmup_mutations: int = 8   # Mutations per episode during warmup
-    elite_archive_size: int = 5          # Top K policies for diversity
-    use_parameter_noise: bool = True     # Add noise during rollouts for exploration
-    parameter_noise_scale: float = 0.005 # Small noise for exploration
-    use_elite_crossover: bool = True     # Enable crossover with elite archive
-    crossover_probability: float = 0.3   # Probability of crossover vs pure mutation
+    neuroevo_warmup_episodes: int = 10  # Reduced: Pure evolution before PPO kicks in
+    neuroevo_warmup_mutations: int = 8  # Mutations per episode during warmup
+    elite_archive_size: int = 5  # Top K policies for diversity
+    use_parameter_noise: bool = True  # Add noise during rollouts for exploration
+    parameter_noise_scale: float = 0.005  # Small noise for exploration
+    use_elite_crossover: bool = True  # Enable crossover with elite archive
+    crossover_probability: float = 0.3  # Probability of crossover vs pure mutation
 
     policy_config: PolicyConfig = PolicyConfig()
     rocket_params: RocketParams = RocketParams()
@@ -411,7 +461,7 @@ def _compute_gae(rewards, values, dones, gamma, lam, config):
     """Compute GAE with numerical stability."""
     # Clip rewards to prevent extreme advantage values (research-based fix)
     rewards = jnp.clip(rewards, config.reward_clip_min, config.reward_clip_max)
-    
+
     def scan_fn(carry, inputs):
         reward, value, done = inputs
         next_value = carry
@@ -419,7 +469,9 @@ def _compute_gae(rewards, values, dones, gamma, lam, config):
         advantage = delta + gamma * lam * (1.0 - done) * carry
         # Clip advantage during accumulation to prevent explosion
         # Increased clip range to allow more gradient signal
-        advantage = jnp.clip(advantage, config.advantage_clip_min, config.advantage_clip_max)
+        advantage = jnp.clip(
+            advantage, config.advantage_clip_min, config.advantage_clip_max
+        )
         return advantage, advantage
 
     _, advantages_rev = jax.lax.scan(
@@ -429,7 +481,9 @@ def _compute_gae(rewards, values, dones, gamma, lam, config):
         reverse=True,
     )
     advantages = advantages_rev[::-1]
-    returns = advantages + values[:-1] # Remove aggressive clipping, handle via normalization
+    returns = (
+        advantages + values[:-1]
+    )  # Remove aggressive clipping, handle via normalization
     return advantages, returns
 
 
@@ -442,23 +496,25 @@ def _collect_rollout(
     viewer: mujoco.viewer.Viewer | None = None,
 ) -> Tuple[Dict[str, jnp.ndarray], Dict[str, float]]:
     """Collect sequential rollout with non-blocking visualization."""
-    
+
     # JIT-compiled helper for log probability with numerical stability
     @jax.jit
     def _gaussian_log_prob(mean, log_std, x):
         # Clip log_std to prevent numerical issues
         log_std = jnp.clip(log_std, config.log_std_clip_min, config.log_std_clip_max)
         var = jnp.exp(2 * log_std) + 1e-8  # Add epsilon for stability
-        log_prob = -0.5 * jnp.sum(jnp.square(x - mean) / var + 2 * log_std + jnp.log(2 * np.pi), axis=-1)
+        log_prob = -0.5 * jnp.sum(
+            jnp.square(x - mean) / var + 2 * log_std + jnp.log(2 * np.pi), axis=-1
+        )
         return jnp.clip(log_prob, -100.0, 100.0)  # Prevent extreme values
-    
+
     env.configure_stage(stage)
     observation = env.reset()
 
     # Initialize GRU hidden state (zero) - GRU uses single hidden state
     gru_dim = config.policy_config.gru_hidden_dim
     hidden = jnp.zeros((1, gru_dim))
-    
+
     # Batched buffers
     obs_buffer, action_buffer, logprob_buffer = [], [], []
     reward_buffer, value_buffer, done_buffer = [], [], []
@@ -471,75 +527,77 @@ def _collect_rollout(
     episode_returns = []
     current_episode_return = 0.0
     current_steps = 0
-    
+
     # Non-blocking visualization timing
     last_render_time = time.time()
     target_render_fps = 60.0  # Target visual update rate (independent of sim speed)
 
     # FPS tracking for performance monitoring
     rollout_start_time = time.time()
-    
+
     # RAJS (Random Annealing Jump Start) state tracking
     # Uses heuristic controller for first N steps, then RL takes over
     episode_step = 0  # Steps within current episode
     rajs_guide_horizon = 0  # Will be randomized at episode start
-    
+
     for step in range(config.rollout_length):
         state.rng, key, rajs_key = jax.random.split(state.rng, 3)
-        
+
         # Determine action (Single Step)
         # Input: [Batch=1, Features]
         # Hidden: [Batch=1, Hidden]
         # Dones: [Batch=1] (Always 0 during mid-step of rollout logic handled inside?)
         # Step: The RecurrentActorCritic resets state if done=1.
         # But here 'hidden' is carried.
-        
+
         # Store PRE-UPDATE hidden state (to train on this step)
         hidden_buffer_h.append(hidden[0])  # Squeeze batch, GRU uses single state
-        
+
         # Expand dims for batch=1
-        obs_in = norm_observation[None, :] 
-        dones_in = jnp.array([0.0]) # Always 0 for stepping, we handle reset manually
-        
+        obs_in = norm_observation[None, :]
+        dones_in = jnp.array([0.0])  # Always 0 for stepping, we handle reset manually
+
         # Policy Step
         mean, log_std, value, new_hidden = funcs.distribution(
             state.params, obs_in, hidden, dones_in, key=None, deterministic=True
         )
-        
+
         # Clip std to prevent extreme noise
         std = jnp.clip(jnp.exp(log_std), 1e-6, 1.0)
         epsilon = jax.random.normal(key, shape=mean.shape)
         action = mean + std * epsilon
         action = jnp.clip(action, -1.0, 1.0)
-        
+
         # RAJS: Override action with smart PD heuristic during guide phase
         # STAGED LEARNING: Only active when rajs_enabled (Phase 2+)
         # Uses proportional-derivative control based on altitude and velocity
-        rajs_active = (config.use_rajs or state.rajs_enabled) and episode_step < rajs_guide_horizon
+        rajs_active = (
+            config.use_rajs or state.rajs_enabled
+        ) and episode_step < rajs_guide_horizon
         if rajs_active:
             # Extract state from raw observation (denormalized)
             obs_raw = observation  # Use raw obs, not normalized
             alt = float(obs_raw[2])  # z position (altitude)
-            vz = float(obs_raw[5])   # z velocity (vertical speed)
-            
+            vz = float(obs_raw[5])  # z velocity (vertical speed)
+
             # Smart PD Heuristic:
             # Thrust: Higher when falling fast or low altitude
             # target_vz = -0.5 * sqrt(alt) for soft landing trajectory
             target_vz = -0.5 * np.sqrt(max(alt, 0.1))
             vz_error = vz - target_vz  # Negative when falling too fast
-            
+
             # PD gains tuned for rocket dynamics
             kp_thrust = 0.3  # Proportional gain
             kd_thrust = 0.1  # Derivative gain (damping)
-            
+
             # Base thrust for hover + correction
             thrust = 0.5 + kp_thrust * (-vz_error) + kd_thrust * (vz if vz < 0 else 0)
             thrust = np.clip(thrust, 0.2, 0.9)  # Safety bounds
-            
+
             # Gimbal: Correct for lateral velocity and position
             vx, vy = float(obs_raw[3]), float(obs_raw[4])
             px, py = float(obs_raw[0]), float(obs_raw[1])
-            
+
             # ============================================================
             # CRITICAL: Orientation-based gimbal control for TVC stabilization
             # This is what makes the rocket ACTIVELY COUNTERACT TILT
@@ -552,7 +610,7 @@ def _collect_rollout(
             #   [18:20] = gimbal angles
             #   [20:22] = gimbal velocities
             #   [22:...] = targets, errors, etc.
-            
+
             # Extract rotation matrix (3x3) from indices [6:15]
             R_flat = obs_raw[6:15]
             # R is stored row-major: R[i,j] = R_flat[i*3 + j]
@@ -561,71 +619,81 @@ def _collect_rollout(
             # R[2, 1] ≈ -sin(roll) for small angles
             R_20 = float(R_flat[6])  # R[2,0] = sin(pitch)
             R_21 = float(R_flat[7])  # R[2,1] = -sin(roll)
-            
+
             # Tilt angles from rotation matrix (more accurate than quaternion approx)
-            pitch_tilt = R_20   # Positive = tilted forward
-            roll_tilt = -R_21   # Positive = tilted right
-            
+            pitch_tilt = R_20  # Positive = tilted forward
+            roll_tilt = -R_21  # Positive = tilted right
+
             # Get angular velocity from correct indices [15:18]
             omega_x = float(obs_raw[15])  # Angular velocity around X
             omega_y = float(obs_raw[16])  # Angular velocity around Y
-            
+
             # PD gains for position correction
             kp_gimbal = 0.02
             kd_gimbal = 0.05
-            
+
             # PD gains for orientation correction (CRITICAL for TVC)
-            kp_orient = 0.12   # Orientation proportional gain
-            kd_orient = 0.06   # Angular velocity damping
-            
+            kp_orient = 0.12  # Orientation proportional gain
+            kd_orient = 0.06  # Angular velocity damping
+
             # Combined gimbal control: position + orientation corrections
             # Gimbal X (pitch control): correct for forward tilt and lateral Y drift
             # Gimbal Y (roll control): correct for roll tilt and lateral X drift
-            gimbal_x = (-kp_gimbal * px - kd_gimbal * vx 
-                       - kp_orient * pitch_tilt - kd_orient * omega_y)
-            gimbal_y = (-kp_gimbal * py - kd_gimbal * vy 
-                       + kp_orient * roll_tilt + kd_orient * omega_x)
-            
+            gimbal_x = (
+                -kp_gimbal * px
+                - kd_gimbal * vx
+                - kp_orient * pitch_tilt
+                - kd_orient * omega_y
+            )
+            gimbal_y = (
+                -kp_gimbal * py
+                - kd_gimbal * vy
+                + kp_orient * roll_tilt
+                + kd_orient * omega_x
+            )
+
             gimbal_x = np.clip(gimbal_x, -0.12, 0.12)
             gimbal_y = np.clip(gimbal_y, -0.12, 0.12)
-            
+
             action = jnp.array([[gimbal_x, gimbal_y, thrust]])
         episode_step += 1
-        
+
         log_prob = _gaussian_log_prob(mean, log_std, action)
-        
+
         # Squeeze batch
         action_squeezed = action[0]
         value_squeezed = value[0]
         log_prob_squeezed = log_prob[0]
-        
+
         obs_buffer.append(norm_observation)
         action_buffer.append(action_squeezed)
         logprob_buffer.append(log_prob_squeezed)
         value_buffer.append(value_squeezed)
-        
+
         # Env Step - ensure actions are valid (no NaN/Inf)
         action_np = np.asarray(action_squeezed, dtype=np.float32)
         # Replace NaN/Inf with safe defaults
         if not np.all(np.isfinite(action_np)):
-            action_np = np.clip(np.nan_to_num(action_np, nan=0.0, posinf=0.1, neginf=-0.1), -0.14, 0.14)
+            action_np = np.clip(
+                np.nan_to_num(action_np, nan=0.0, posinf=0.1, neginf=-0.1), -0.14, 0.14
+            )
         step_result = env.step(action_np)
-        
+
         reward = step_result.reward
         done = step_result.done
-        
+
         reward_buffer.append(reward)
         done_buffer.append(1.0 if done else 0.0)
-        
+
         current_episode_return += reward
         current_steps += 1
-        
+
         if viewer and viewer.is_running():
             # Non-blocking visualization: update at target FPS based on wall-clock time
             # This decouples training speed from visualization speed
             current_time = time.time()
             time_since_render = current_time - last_render_time
-            
+
             # Render at target FPS (e.g., 60fps = every 0.0167s)
             if time_since_render >= 1.0 / target_render_fps:
                 viewer.sync()
@@ -635,22 +703,29 @@ def _collect_rollout(
         if done:
             # Check success - must meet ALL criteria:
             # 1. Position within tolerance
-            # 2. Velocity within tolerance  
+            # 2. Velocity within tolerance
             # 3. Orientation upright (quaternion w > 0.95 means < 18 degrees tilt)
             # 4. Survived at least 80% of episode (for hover, must hold position)
-            pos_error = float(np.linalg.norm(env.data.qpos[0:3] - np.array(stage.target_position)))
-            vel_error = float(np.linalg.norm(env.data.qvel[0:3] - np.array(stage.target_velocity)))
+            pos_error = float(
+                np.linalg.norm(env.data.qpos[0:3] - np.array(stage.target_position))
+            )
+            vel_error = float(
+                np.linalg.norm(env.data.qvel[0:3] - np.array(stage.target_velocity))
+            )
             quat_w = abs(env.data.qpos[3])  # Quaternion w component (1.0 = upright)
-            
+
             # Success requires: position OK, velocity OK, upright, AND survived most of episode
-            min_survival = int(config.max_episode_steps * 0.7)  # Must survive 70% of episode
+            min_survival = int(
+                config.max_episode_steps * 0.7
+            )  # Must survive 70% of episode
             episode_success = (
-                pos_error < stage.position_tolerance 
+                pos_error < stage.position_tolerance
                 and vel_error < stage.velocity_tolerance
                 and quat_w > 0.92  # < ~23 degrees tilt
-                and current_steps >= min_survival  # Must actually hover, not just start near
+                and current_steps
+                >= min_survival  # Must actually hover, not just start near
             )
-            
+
             # Track errors for metrics
             final_pos_error = pos_error
             final_vel_error = vel_error
@@ -659,14 +734,14 @@ def _collect_rollout(
             episode_returns.append(current_episode_return)
             current_episode_return = 0.0
             current_steps = 0
-            
+
             # Reset Env
             observation = env.reset()
             norm_observation = obs_rms.normalize(observation)
-            
+
             # Reset GRU Hidden State for next step!
             hidden = jnp.zeros_like(hidden)
-            
+
             # RAJS: Reset episode step and randomize new guide horizon
             episode_step = 0
             if config.use_rajs:
@@ -674,22 +749,30 @@ def _collect_rollout(
                 if config.rajs_adaptive:
                     # Higher success rate = less guidance needed
                     # BUT: Never drop below 30% guide to ensure continuous demonstration
-                    success_rate = len([s for s in episode_successes if s]) / max(len(episode_successes), 1)
-                    annealing_factor = max(0.3, 1.0 - success_rate * 0.7)  # Floor at 30%
+                    success_rate = len([s for s in episode_successes if s]) / max(
+                        len(episode_successes), 1
+                    )
+                    annealing_factor = max(
+                        0.3, 1.0 - success_rate * 0.7
+                    )  # Floor at 30%
                 else:
                     # Original: episode-based annealing
-                    annealing_factor = config.rajs_annealing_rate ** state.update_step
+                    annealing_factor = config.rajs_annealing_rate**state.update_step
                 max_guide = int(config.rajs_initial_guide_steps * annealing_factor)
-                rajs_guide_horizon = int(jax.random.uniform(rajs_key) * max(max_guide, 1))
+                rajs_guide_horizon = int(
+                    jax.random.uniform(rajs_key) * max(max_guide, 1)
+                )
         else:
             observation = step_result.observation
             norm_observation = obs_rms.normalize(observation)
-            hidden = new_hidden # Propagate hidden state
+            hidden = new_hidden  # Propagate hidden state
 
     # Final bootstrap value
     obs_in = norm_observation[None, :]
     dones_in = jnp.array([0.0])
-    _, _, final_value, _ = funcs.distribution(state.params, obs_in, hidden, dones_in, key=None)
+    _, _, final_value, _ = funcs.distribution(
+        state.params, obs_in, hidden, dones_in, key=None
+    )
     value_buffer.append(final_value[0])
 
     batch = {
@@ -697,7 +780,7 @@ def _collect_rollout(
         "actions": jnp.stack(action_buffer),
         "log_probs": jnp.stack(logprob_buffer),
         "rewards": jnp.array(reward_buffer, dtype=jnp.float32),
-        "values": jnp.stack(value_buffer), # T+1
+        "values": jnp.stack(value_buffer),  # T+1
         "dones": jnp.array(done_buffer, dtype=jnp.float32),
         "hidden_h": jnp.stack(hidden_buffer_h),  # GRU single state
     }
@@ -705,18 +788,28 @@ def _collect_rollout(
     # Calculate training throughput
     rollout_duration = time.time() - rollout_start_time
     steps_per_second = config.rollout_length / max(rollout_duration, 0.001)
-    
+
     stats = {
-        "episode_return": episode_returns[-1] if episode_returns else current_episode_return,
+        "episode_return": (
+            episode_returns[-1] if episode_returns else current_episode_return
+        ),
         "rollout_total_return": float(jnp.sum(batch["rewards"])),
         "episode_success": any(episode_successes) if episode_successes else False,
-        "rollout_success_rate": sum(episode_successes)/len(episode_successes) if episode_successes else 0.0,
+        "rollout_success_rate": (
+            sum(episode_successes) / len(episode_successes)
+            if episode_successes
+            else 0.0
+        ),
         "steps_per_second": steps_per_second,
-        "pos_error": final_pos_error if 'final_pos_error' in dir() else 0.0,
-        "vel_error": final_vel_error if 'final_vel_error' in dir() else 0.0,
-        "episode_length": final_episode_length if 'final_episode_length' in dir() else config.rollout_length,
+        "pos_error": final_pos_error if "final_pos_error" in dir() else 0.0,
+        "vel_error": final_vel_error if "final_vel_error" in dir() else 0.0,
+        "episode_length": (
+            final_episode_length
+            if "final_episode_length" in dir()
+            else config.rollout_length
+        ),
     }
-    
+
     return batch, stats
 
 
@@ -729,35 +822,41 @@ def _ppo_update(
     current_entropy_coef: float,
 ) -> Tuple[TrainingState, Dict[str, float]]:
     """Recurrent PPO Update."""
-    
+
     # 1. GAE
     advantages, returns = _compute_gae(
-        batch["rewards"], batch["values"], batch["dones"],
-        config.gamma, config.lam, config
+        batch["rewards"],
+        batch["values"],
+        batch["dones"],
+        config.gamma,
+        config.lam,
+        config,
     )
-    
+
     # Update return RMS and normalize returns for value function targets
     # This prevents the value loss from exploding when returns are in the thousands
     # BUG-002 FIX: Use normalize() output directly instead of redundant manual computation
     norm_returns = state.return_rms.normalize(np.asarray(returns), update_stats=True)
-    norm_returns = jnp.clip(norm_returns, -config.norm_return_clip, config.norm_return_clip)
+    norm_returns = jnp.clip(
+        norm_returns, -config.norm_return_clip, config.norm_return_clip
+    )
 
     # Normalize advantages
     advantages = (advantages - jnp.mean(advantages)) / (jnp.std(advantages) + 1e-8)
-    
+
     # 2. Reshape into Sequences [Num_Seq, Seq_Len, Features]
     # Rollout length (e.g. 2048) must be divisible by sequence_length (e.g. 64)
     T = config.rollout_length
     S = config.sequence_length
     if T % S != 0:
         raise ValueError(f"Rollout length {T} not divisible by sequence length {S}")
-    
+
     num_sequences = T // S
-    
+
     def to_seq(x):
         # x is [T, ...] -> [Num_Seq, Seq_Len, ...]
         shape = (num_sequences, S) + x.shape[1:]
-        return x[:num_sequences*S].reshape(shape)
+        return x[: num_sequences * S].reshape(shape)
 
     # Prepare dataset
     dataset = {
@@ -765,10 +864,12 @@ def _ppo_update(
         "actions": to_seq(batch["actions"]),
         "log_probs": to_seq(batch["log_probs"]),
         "advantages": to_seq(advantages),
-        "returns": to_seq(norm_returns), # Use normalized returns!
+        "returns": to_seq(norm_returns),  # Use normalized returns!
         "values": to_seq(batch["values"][:-1]),
         "dones": to_seq(batch["dones"]),
-        "hidden_h": to_seq(batch["hidden_h"])[:, 0, :], # Take only first hidden state of each sequence
+        "hidden_h": to_seq(batch["hidden_h"])[
+            :, 0, :
+        ],  # Take only first hidden state of each sequence
     }
 
     # Loss Function (Scanned over sequence) - with numerical stability
@@ -779,96 +880,120 @@ def _ppo_update(
         # Use initial hidden state from rollout (GRU uses single state)
         init_h = minibatch["hidden_h"]
         hidden = init_h
-        
+
         # Forward pass (RecurrentActorCritic handles scan)
         # mean, log_std, values: [Batch, Seq_Len, Features]
         mean, log_std, values, _ = funcs.distribution(
             params, obs, hidden, dones, deterministic=True
         )
-        
+
         # Calc probabilities with numerical stability
         def log_prob_fn(m, l, a):
             # Clip log_std to prevent numerical issues
             l = jnp.clip(l, config.log_std_clip_min, config.log_std_clip_max)
             var = jnp.exp(2 * l) + 1e-8  # Add epsilon for stability
-            log_prob = -0.5 * jnp.sum(jnp.square(a - m) / var + 2 * l + jnp.log(2 * np.pi), axis=-1)
-            return jnp.clip(log_prob, config.log_prob_clip_min, config.log_prob_clip_max)  # Prevent extreme values
-            
+            log_prob = -0.5 * jnp.sum(
+                jnp.square(a - m) / var + 2 * l + jnp.log(2 * np.pi), axis=-1
+            )
+            return jnp.clip(
+                log_prob, config.log_prob_clip_min, config.log_prob_clip_max
+            )  # Prevent extreme values
+
         new_log_probs = log_prob_fn(mean, log_std, minibatch["actions"])
-        old_log_probs = jnp.clip(minibatch["log_probs"], config.log_prob_clip_min, config.log_prob_clip_max)
-        
+        old_log_probs = jnp.clip(
+            minibatch["log_probs"], config.log_prob_clip_min, config.log_prob_clip_max
+        )
+
         # Standard PPO logic with clipped ratio for stability
         log_ratio = new_log_probs - old_log_probs
-        log_ratio = jnp.clip(log_ratio, -config.ratio_clip_limit, config.ratio_clip_limit)  # Prevent exp explosion
+        log_ratio = jnp.clip(
+            log_ratio, -config.ratio_clip_limit, config.ratio_clip_limit
+        )  # Prevent exp explosion
         ratio = jnp.exp(log_ratio)
-        clipped_ratio = jnp.clip(ratio, 1.0 - config.clip_epsilon, 1.0 + config.clip_epsilon)
-        
+        clipped_ratio = jnp.clip(
+            ratio, 1.0 - config.clip_epsilon, 1.0 + config.clip_epsilon
+        )
+
         # Normalize advantages for stability
         advantages = minibatch["advantages"]
         advantages = (advantages - jnp.mean(advantages)) / (jnp.std(advantages) + 1e-8)
-        
+
         surrogate = ratio * advantages
         clipped_surrogate = clipped_ratio * advantages
         actor_loss = -jnp.mean(jnp.minimum(surrogate, clipped_surrogate))
-        
+
         # Clipped value function loss (PPO best practice for stability)
         old_values = minibatch["values"]
-        returns = jnp.clip(minibatch["returns"], -config.return_clip_limit, config.return_clip_limit)
-        value_clipped = old_values + jnp.clip(values - old_values, -config.value_clip_epsilon, config.value_clip_epsilon)
+        returns = jnp.clip(
+            minibatch["returns"], -config.return_clip_limit, config.return_clip_limit
+        )
+        value_clipped = old_values + jnp.clip(
+            values - old_values, -config.value_clip_epsilon, config.value_clip_epsilon
+        )
         value_loss_unclipped = jnp.square(returns - values)
         value_loss_clipped = jnp.square(returns - value_clipped)
-        value_loss = 0.5 * jnp.mean(jnp.maximum(value_loss_unclipped, value_loss_clipped))
-        
+        value_loss = 0.5 * jnp.mean(
+            jnp.maximum(value_loss_unclipped, value_loss_clipped)
+        )
+
         # CRITICAL: Clip extreme value losses to prevent instability (research-backed)
         value_loss = jnp.clip(value_loss, 0.0, config.value_loss_clip)
-        
+
         # Entropy with stability
-        log_std_clipped = jnp.clip(log_std, config.log_std_clip_min, config.log_std_clip_max)
-        entropy = jnp.mean(jnp.sum(log_std_clipped + 0.5 * jnp.log(2.0 * jnp.pi * jnp.e), axis=-1))
-        
+        log_std_clipped = jnp.clip(
+            log_std, config.log_std_clip_min, config.log_std_clip_max
+        )
+        entropy = jnp.mean(
+            jnp.sum(log_std_clipped + 0.5 * jnp.log(2.0 * jnp.pi * jnp.e), axis=-1)
+        )
+
         # BUG-014: Apply policy_loss_coef for value pretraining
-        total_loss = config.policy_loss_coef * actor_loss + config.value_coef * value_loss - current_entropy_coef * entropy
-        
+        total_loss = (
+            config.policy_loss_coef * actor_loss
+            + config.value_coef * value_loss
+            - current_entropy_coef * entropy
+        )
+
         # KL
         approx_kl = jnp.mean(old_log_probs - new_log_probs)
-        
+
         return total_loss, (actor_loss, value_loss, entropy, approx_kl)
 
     # Optimization Loop - FIXED: Always do at least one update per epoch
     params = state.params
     opt_state = state.opt_state
-    
+
     updates_this_call = 0  # Track updates in this PPO call
     final_kl = 0.0
     kl_exceeded = False
-    
+
     for epoch in range(config.num_epochs):
         if kl_exceeded and epoch > 0:  # Allow at least one full epoch
             break
-        
+
         # Shuffle SEQUENCES
         inds = np.arange(num_sequences)
         np.random.shuffle(inds)
-        
+
         for start in range(0, num_sequences, config.minibatch_size):
             end = start + config.minibatch_size
             idx = inds[start:end]
-            
+
             mb = {k: v[idx] for k, v in dataset.items()}
-            
+
             (loss, aux), grads = jax.value_and_grad(loss_fn, has_aux=True)(params, mb)
-            
+
             # Skip update if loss is NaN/Inf (gradient explosion protection)
             if not jnp.isfinite(loss):
                 LOGGER.warning("Skipping update due to NaN/Inf loss")
                 continue
-            
+
             # ALWAYS do the update first
             updates, opt_state = optimizer.update(grads, opt_state, params)
             params = optax.apply_updates(params, updates)
             updates_this_call += 1
             state.update_step += 1
-            
+
             # THEN check KL for early stopping on future epochs
             final_kl = float(aux[3])
             if final_kl > config.target_kl:
@@ -878,12 +1003,12 @@ def _ppo_update(
 
     state.params = params
     state.opt_state = opt_state
-    
+
     metrics = {
-        "loss": float(loss) if 'loss' in dir() else 0.0,
-        "actor_loss": float(aux[0]) if 'aux' in dir() else 0.0,
-        "value_loss": float(aux[1]) if 'aux' in dir() else 0.0,
-        "entropy": float(aux[2]) if 'aux' in dir() else 0.0,
+        "loss": float(loss) if "loss" in dir() else 0.0,
+        "actor_loss": float(aux[0]) if "aux" in dir() else 0.0,
+        "value_loss": float(aux[1]) if "aux" in dir() else 0.0,
+        "entropy": float(aux[2]) if "aux" in dir() else 0.0,
         "kl": final_kl,
         "updates_this_ep": updates_this_call,
     }
@@ -894,29 +1019,31 @@ def _evaluate_candidate(env, stage, params, funcs, obs_rms, config, num_episodes
     """Eval with GRU - Production Grade."""
     total_r = 0.0
     gru_dim = config.policy_config.gru_hidden_dim
-    
+
     for _ in range(num_episodes):
         env.configure_stage(stage)
         obs = env.reset()
         done = False
-        
+
         # Initialize GRU hidden state (single state, not tuple)
         hidden = jnp.zeros((1, gru_dim))
-        
+
         ep_r = 0
         steps = 0
         while not done and steps < config.eval_max_steps:
             norm_obs = obs_rms.normalize(obs, update_stats=False)
-            
+
             mean, _, _, hidden = funcs.distribution(
                 params, norm_obs[None, :], hidden, jnp.array([0.0]), deterministic=True
             )
-            
+
             action = np.array(mean[0])
             # Protect against NaN/Inf actions
             if not np.all(np.isfinite(action)):
-                action = np.clip(np.nan_to_num(action, nan=0.0, posinf=0.1, neginf=-0.1), -0.14, 0.14)
-            
+                action = np.clip(
+                    np.nan_to_num(action, nan=0.0, posinf=0.1, neginf=-0.1), -0.14, 0.14
+                )
+
             res = env.step(action)
             ep_r += res.reward
             obs = res.observation
@@ -924,6 +1051,343 @@ def _evaluate_candidate(env, stage, params, funcs, obs_rms, config, num_episodes
             steps += 1
         total_r += ep_r
     return total_r / num_episodes
+
+
+def _setup_viewer(env: TvcEnv) -> mujoco.viewer.Viewer:
+    viewer = mujoco.viewer.launch_passive(env.model, env.data)
+
+    # Camera: Track the rocket body with good viewing angle
+    viewer.cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
+    viewer.cam.trackbodyid = env.model.body("vehicle").id
+    viewer.cam.distance = 25.0
+    viewer.cam.azimuth = 135
+    viewer.cam.elevation = -15
+    viewer.cam.lookat[:] = [0, 0, 10]
+
+    # Visual Options: Minimal overlays (clean view)
+    viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTFORCE] = False
+    viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT] = False
+    viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_COM] = False
+    viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_ACTUATOR] = False
+
+    # Rendering quality
+    viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_TRANSPARENT] = False
+    viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_LIGHT] = True
+
+    LOGGER.info("Viewer: Camera tracking rocket, debug overlays enabled")
+    return viewer
+
+
+def _run_neuroevo_warmup(
+    episode: int,
+    state: TrainingState,
+    batch: Dict[str, jnp.ndarray],
+    funcs: PolicyFunctions,
+    config: TrainingConfig,
+    env: TvcEnv,
+    stage: CurriculumStage,
+    stats: Dict[str, float],
+) -> None:
+    from .policies import safe_mutate_parameters_smg, crossover_parameters
+
+    sample_obs = batch["observations"][: config.sequence_length]
+    sample_obs = sample_obs.reshape(1, sample_obs.shape[0], sample_obs.shape[1])
+    gru_dim = config.policy_config.gru_hidden_dim
+    sample_hidden = jnp.zeros((1, gru_dim))
+
+    if len(state.recent_parent_fitness) >= 3:
+        current_fitness = state.get_rolling_parent_fitness()
+    else:
+        current_fitness = stats["episode_return"]
+
+    best_params = state.params
+    best_fitness = current_fitness
+
+    for _ in range(config.neuroevo_warmup_mutations):
+        state.rng, mut_key, cross_key, select_key = jax.random.split(state.rng, 4)
+
+        parent = state.params
+        if config.use_elite_crossover and len(state.elite_archive) > 0:
+            if float(jax.random.uniform(select_key)) < config.crossover_probability:
+                elite_idx = int(
+                    jax.random.randint(select_key, (), 0, len(state.elite_archive))
+                )
+                _, elite_params = state.elite_archive[elite_idx]
+                parent = crossover_parameters(
+                    cross_key, state.params, elite_params, 0.5
+                )
+
+        warmup_mutation_scale = config.mutation_scale * 3.0
+        mutant_params = safe_mutate_parameters_smg(
+            mut_key,
+            parent,
+            funcs,
+            sample_obs,
+            sample_hidden,
+            scale=warmup_mutation_scale,
+        )
+
+        mutant_fitness = _evaluate_candidate(
+            env, stage, mutant_params, funcs, state.obs_rms, config, num_episodes=1
+        )
+
+        if mutant_fitness > best_fitness:
+            best_fitness = mutant_fitness
+            best_params = mutant_params
+
+    if best_fitness > current_fitness:
+        state.params = best_params
+        state.update_elite_archive(best_fitness, best_params)
+        LOGGER.info(
+            f"  [Neuroevo Warmup] Ep {episode}: R {current_fitness:.1f} -> {best_fitness:.1f} (+{best_fitness-current_fitness:.1f})"
+        )
+
+    state.update_parent_fitness(stats["episode_return"])
+
+    if episode == config.neuroevo_warmup_episodes - 1:
+        state.neuroevo_warmup_complete = True
+        state.learning_phase = 1
+        LOGGER.info("")
+        LOGGER.info("=" * 60)
+        LOGGER.info("PHASE 1: Pure PPO Starting (Neuroevo Warmup Complete)")
+        LOGGER.info(f"   Best warmup fitness: {state.best_return:.1f}")
+        LOGGER.info(f"   Elite archive size: {len(state.elite_archive)}")
+        LOGGER.info("=" * 60)
+
+
+def _perform_ppo_updates(
+    episode: int,
+    state: TrainingState,
+    batch: Dict[str, jnp.ndarray],
+    optimizer: optax.GradientTransformation,
+    funcs: PolicyFunctions,
+    config: TrainingConfig,
+    entropy_coef: float,
+) -> Tuple[TrainingState, Dict[str, float]]:
+    if state.update_step < config.value_pretrain_updates:
+        value_pretrain_config = dataclass_replace(
+            config,
+            policy_loss_coef=0.1,
+        )
+        state, metrics = _ppo_update(
+            state, batch, optimizer, funcs, value_pretrain_config, entropy_coef * 0.1
+        )
+        if episode % 10 == 0:
+            LOGGER.info(
+                f"  [Value Pretrain {state.update_step}/{config.value_pretrain_updates}]"
+            )
+    elif state.post_evolution_cooldown_counter > 0:
+        cooldown_config = dataclass_replace(
+            config,
+            num_epochs=config.post_evolution_epochs,
+            learning_rate=config.learning_rate * config.post_evolution_lr_scale,
+        )
+        state, metrics = _ppo_update(
+            state, batch, optimizer, funcs, cooldown_config, entropy_coef * 0.5
+        )
+        if episode % 5 == 0:
+            LOGGER.info(
+                f"  [Post-Evolution Cooldown: {state.post_evolution_cooldown_counter} eps remaining, using {config.post_evolution_epochs} PPO epochs]"
+            )
+    else:
+        state, metrics = _ppo_update(
+            state, batch, optimizer, funcs, config, entropy_coef
+        )
+
+    return state, metrics
+
+
+def _handle_stage_progression(
+    episode: int,
+    state: TrainingState,
+    rolling_sr: float,
+    curriculum: List[CurriculumStage],
+    stage: CurriculumStage,
+    config: TrainingConfig,
+    entropy_coef: float,
+) -> float:
+    if (
+        not state.rajs_enabled
+        and rolling_sr >= config.rajs_enable_threshold
+        and state.stage_attempts >= 50
+    ):
+        state.rajs_enabled = True
+        state.learning_phase = 2
+        LOGGER.info("")
+        LOGGER.info("=" * 60)
+        LOGGER.info("PHASE 2 UNLOCKED: RAJS Enabled (40% SR achieved)")
+        LOGGER.info("   Heuristic guidance will now assist learning")
+        LOGGER.info("=" * 60)
+
+    if (
+        not state.evolution_enabled
+        and rolling_sr >= config.evolution_enable_threshold
+        and state.stage_attempts >= 100
+    ):
+        state.evolution_enabled = True
+        state.learning_phase = 3
+        LOGGER.info("")
+        LOGGER.info("=" * 60)
+        LOGGER.info("PHASE 3 UNLOCKED: Evolution Enabled (70% SR achieved)")
+        LOGGER.info("   Neuroevolution will now explore policy mutations")
+        LOGGER.info("=" * 60)
+
+    previous_stage_index = state.stage_index
+    consecutive_success_req = stage.success_episodes
+    recent_streak = (
+        sum(1 for s in state.recent_successes[-consecutive_success_req:] if s)
+        if state.recent_successes
+        else 0
+    )
+    has_streak = recent_streak >= consecutive_success_req
+
+    sr_threshold = 0.60 if state.stage_index == 0 else 0.70
+
+    if (
+        rolling_sr >= sr_threshold
+        and state.stage_attempts >= stage.min_episodes
+        and has_streak
+    ):
+        if state.stage_index < len(curriculum) - 1:
+            old_stage_name = curriculum[state.stage_index].name
+            state.stage_index += 1
+            state.stage_attempts = 0
+            state.stage_successes = 0
+            state.recent_successes = []
+            new_stage = curriculum[state.stage_index]
+            LOGGER.info(f"")
+            LOGGER.info(f"STAGE UP! {old_stage_name} -> {new_stage.name}")
+            LOGGER.info(
+                f"   New altitude: {new_stage.initial_position[2]:.0f}m | Target SR: {sr_threshold*100:.0f}%"
+            )
+
+            if config.staged_exploration_reset > 0:
+                entropy_coef = config.entropy_coef * config.staged_exploration_reset
+
+    if state.stage_index == previous_stage_index:
+        entropy_coef *= config.entropy_coef_decay
+
+    return entropy_coef
+
+
+def _run_evolution_step(
+    episode: int,
+    total_episodes: int,
+    state: TrainingState,
+    batch: Dict[str, jnp.ndarray],
+    stats: Dict[str, float],
+    funcs: PolicyFunctions,
+    config: TrainingConfig,
+    env: TvcEnv,
+    stage: CurriculumStage,
+    optimizer: optax.GradientTransformation,
+) -> None:
+    from .policies import safe_mutate_parameters_smg, crossover_parameters
+
+    sample_obs = batch["observations"][: config.sequence_length]
+    sample_obs = sample_obs.reshape(1, sample_obs.shape[0], sample_obs.shape[1])
+    gru_dim = config.policy_config.gru_hidden_dim
+    sample_hidden = jnp.zeros((1, gru_dim))
+
+    rolling_parent_fitness = state.get_rolling_parent_fitness()
+    current_episode_fitness = stats["episode_return"]
+
+    best_params = state.params
+    best_fitness = current_episode_fitness
+
+    episode_progress = min(episode / total_episodes, 1.0)
+    adaptive_mutation_scale = config.mutation_scale * (0.3 + 0.7 * episode_progress)
+
+    for candidate_idx in range(config.evolution_candidates):
+        state.rng, mut_key, cross_key, select_key = jax.random.split(state.rng, 4)
+
+        parent = state.params
+        crossover_used = False
+        if config.use_elite_crossover and len(state.elite_archive) > 0:
+            if float(jax.random.uniform(select_key)) < config.crossover_probability:
+                elite_idx = int(
+                    jax.random.randint(select_key, (), 0, len(state.elite_archive))
+                )
+                _, elite_params = state.elite_archive[elite_idx]
+                parent = crossover_parameters(
+                    cross_key, state.params, elite_params, 0.5
+                )
+                crossover_used = True
+
+        mutant_params = safe_mutate_parameters_smg(
+            mut_key,
+            parent,
+            funcs,
+            sample_obs,
+            sample_hidden,
+            scale=adaptive_mutation_scale,
+        )
+
+        mutant_fitness = _evaluate_candidate(
+            env,
+            stage,
+            mutant_params,
+            funcs,
+            state.obs_rms,
+            config,
+            num_episodes=config.evolution_eval_episodes,
+        )
+
+        if mutant_fitness > best_fitness:
+            best_fitness = mutant_fitness
+            best_params = mutant_params
+            cross_str = " (crossover)" if crossover_used else ""
+            LOGGER.info(
+                f"  Evolution: Candidate {candidate_idx}{cross_str} improved! R: {mutant_fitness:.1f}"
+            )
+
+    comparison_fitness = (
+        rolling_parent_fitness
+        if rolling_parent_fitness > -float("inf")
+        else current_episode_fitness
+    )
+    improvement_ratio = best_fitness / max(abs(comparison_fitness), 1.0)
+    meets_threshold = improvement_ratio >= config.fitness_improvement_threshold
+
+    if best_params is not state.params and meets_threshold:
+        state.params = best_params
+
+        added_to_elite = state.update_elite_archive(best_fitness, best_params)
+        elite_str = " [added to elite archive]" if added_to_elite else ""
+
+        LOGGER.info(
+            f"  Evolution: Accepted mutant with R: {best_fitness:.1f} ({improvement_ratio:.1%} vs rolling avg){elite_str}"
+        )
+
+        state.post_evolution_cooldown_counter = config.post_evolution_cooldown
+        LOGGER.info(
+            f"  Evolution: Cooldown activated for {config.post_evolution_cooldown} episodes"
+        )
+
+        LOGGER.info(
+            f"  Evolution: Soft optimizer reset (keeping {config.soft_reset_momentum_keep*100:.0f}% momentum)"
+        )
+        new_opt_state = optimizer.init(state.params)
+
+        def blend_opt_states(old, new):
+            if isinstance(old, jnp.ndarray) and isinstance(new, jnp.ndarray):
+                if old.shape == new.shape:
+                    return (
+                        config.soft_reset_momentum_keep * old
+                        + (1 - config.soft_reset_momentum_keep) * new
+                    )
+            return new
+
+        try:
+            state.opt_state = jax.tree_util.tree_map(
+                blend_opt_states, state.opt_state, new_opt_state
+            )
+        except:
+            state.opt_state = new_opt_state
+    elif best_params is not state.params:
+        LOGGER.info(
+            f"  Evolution: Rejected mutant (improvement {improvement_ratio:.1%} < threshold {config.fitness_improvement_threshold:.0%})"
+        )
 
 
 def train_controller(
@@ -935,429 +1399,214 @@ def train_controller(
     visualize: bool = False,
 ) -> TrainingState:
     """Entry point for training."""
-    env = TvcEnv(dt=config.dt, ctrl_limit=config.policy_config.action_limit, max_steps=config.max_episode_steps, seed=seed)
-    
+    env = TvcEnv(
+        dt=config.dt,
+        ctrl_limit=config.policy_config.action_limit,
+        max_steps=config.max_episode_steps,
+        seed=seed,
+    )
+
     # Sync physics
     real_params = config.rocket_params.from_model(env.model)
     import dataclasses
+
     config = dataclasses.replace(config, rocket_params=real_params)
     env.apply_rocket_params(config.rocket_params)
-    
+
     curriculum = build_curriculum()
-    
+
     # Init Policy (Recurrent)
     funcs = build_policy_network(config.policy_config)
     rng = jax.random.PRNGKey(seed)
     rng, init_key = jax.random.split(rng)
-    
+
     sample_obs = env.reset()
     # Need sample hidden - GRU uses single state
     sample_hidden = jnp.zeros((1, config.policy_config.gru_hidden_dim))
-    
+
     params, _ = funcs.init(init_key, sample_obs[None, :], sample_hidden)
-    
+
     obs_rms = RunningNormalizer.initialise(sample_obs)
-    
+
     optimizer = optax.chain(
         optax.clip_by_global_norm(0.25),  # Tighter clipping for GRU stability
-        optax.adamw(config.learning_rate, weight_decay=config.weight_decay, eps=1e-5)
+        optax.adamw(config.learning_rate, weight_decay=config.weight_decay, eps=1e-5),
     )
     opt_state = optimizer.init(params)
-    
-    state = TrainingState(params, opt_state, rng, obs_rms, return_rms=RunningNormalizer())
-    
+
+    state = TrainingState(
+        params, opt_state, rng, obs_rms, return_rms=RunningNormalizer()
+    )
+
     LOGGER.info("Recurrent PPO Training Initialized.")
-    
+
     entropy_coef = config.entropy_coef
-    
+
     viewer = None
     if visualize:
-        viewer = mujoco.viewer.launch_passive(env.model, env.data)
-        
-        # ============================================================
-        # VIEWER CONFIGURATION: Camera, Quality, Debug Overlays
-        # ============================================================
-        
-        # Camera: Track the rocket body with good viewing angle
-        viewer.cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
-        viewer.cam.trackbodyid = env.model.body('vehicle').id  # Track rocket (named 'vehicle' in XML)
-        viewer.cam.distance = 25.0  # Zoom distance
-        viewer.cam.azimuth = 135    # Viewing angle (degrees)
-        viewer.cam.elevation = -15  # Slight upward look
-        viewer.cam.lookat[:] = [0, 0, 10]  # Initial focus point
-        
-        # Visual Options: Minimal overlays (clean view)
-        viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTFORCE] = False  # Hide contact forces
-        viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT] = False  # Hide contact points
-        viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_COM] = False           # Hide center of mass balls
-        viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_ACTUATOR] = False      # Hide actuator activity
-        
-        # Rendering quality
-        viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_TRANSPARENT] = False   # Solid objects
-        viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_LIGHT] = True          # Enable lighting
-        
-        LOGGER.info("Viewer: Camera tracking rocket, debug overlays enabled")
+        viewer = _setup_viewer(env)
 
     for episode in range(total_episodes):
-        stage = curriculum[min(state.stage_index, len(curriculum)-1)]
-        
+        stage = curriculum[min(state.stage_index, len(curriculum) - 1)]
+
         # Rollout
         batch, stats = _collect_rollout(env, stage, state, funcs, config, viewer)
-        
+
         # Track training logs for checkpoint
         log_entry = {
             "episode": episode,
-            "return": float(stats['episode_return']),
-            "success": stats['episode_success'],
+            "return": float(stats["episode_return"]),
+            "success": stats["episode_success"],
             "stage": state.stage_index,
             "timestamp": datetime.now().isoformat(),
         }
-        
+
         # ============================================================
         # PHASE 0: NEUROEVOLUTION WARMUP (AS Rocketry-inspired)
-        # Pure evolution for first N episodes to find good starting weights
-        # This is much faster than PPO for initial exploration
         # ============================================================
-        if episode < config.neuroevo_warmup_episodes and not state.neuroevo_warmup_complete:
-            from .policies import safe_mutate_parameters_smg, add_parameter_noise, crossover_parameters
-            
-            # Create sample data for sensitivity computation
-            sample_obs = batch["observations"][:config.sequence_length]
-            sample_obs = sample_obs.reshape(1, sample_obs.shape[0], sample_obs.shape[1])
-            gru_dim = config.policy_config.gru_hidden_dim
-            sample_hidden = jnp.zeros((1, gru_dim))
-            
-            # BUG-008 FIX: Evaluate current params properly before mutations
-            # Use average of recent fitness instead of single stochastic rollout
-            if len(state.recent_parent_fitness) >= 3:
-                current_fitness = state.get_rolling_parent_fitness()
-            else:
-                current_fitness = stats['episode_return']
-            best_params = state.params
-            best_fitness = current_fitness
-            
-            # Multiple mutations per episode during warmup (faster exploration)
-            for mut_idx in range(config.neuroevo_warmup_mutations):
-                state.rng, mut_key, cross_key, select_key = jax.random.split(state.rng, 4)
-                
-                # Optionally crossover with elite before mutation (genetic diversity)
-                parent = state.params
-                if config.use_elite_crossover and len(state.elite_archive) > 0:
-                    if float(jax.random.uniform(select_key)) < config.crossover_probability:
-                        # Select random elite for crossover
-                        elite_idx = int(jax.random.randint(select_key, (), 0, len(state.elite_archive)))
-                        _, elite_params = state.elite_archive[elite_idx]
-                        parent = crossover_parameters(cross_key, state.params, elite_params, 0.5)
-                
-                # Aggressive mutation during warmup (exploring policy space)
-                warmup_mutation_scale = config.mutation_scale * 3.0  # 3x stronger for warmup
-                mutant_params = safe_mutate_parameters_smg(
-                    mut_key, parent, funcs, sample_obs, sample_hidden,
-                    scale=warmup_mutation_scale,
-                )
-                
-                # Quick evaluation (single episode for speed)
-                mutant_fitness = _evaluate_candidate(
-                    env, stage, mutant_params, funcs, state.obs_rms, config,
-                    num_episodes=1  # Fast eval during warmup
-                )
-                
-                if mutant_fitness > best_fitness:
-                    best_fitness = mutant_fitness
-                    best_params = mutant_params
-            
-            # Accept best mutant if improved
-            if best_fitness > current_fitness:
-                state.params = best_params
-                state.update_elite_archive(best_fitness, best_params)
-                LOGGER.info(f"  [Neuroevo Warmup] Ep {episode}: R {current_fitness:.1f} -> {best_fitness:.1f} (+{best_fitness-current_fitness:.1f})")
-            
-            # Update parent fitness tracking
-            state.update_parent_fitness(stats['episode_return'])
-            
-            # Dummy metrics for consistency
-            metrics = {"loss": 0.0, "actor_loss": 0.0, "value_loss": 0.0, "entropy": 0.0, "kl": 0.0}
-            
-            # Check if warmup should end
-            if episode == config.neuroevo_warmup_episodes - 1:
-                state.neuroevo_warmup_complete = True
-                state.learning_phase = 1
-                LOGGER.info("")
-                LOGGER.info("=" * 60)
-                LOGGER.info("PHASE 1: Pure PPO Starting (Neuroevo Warmup Complete)")
-                LOGGER.info(f"   Best warmup fitness: {state.best_return:.1f}")
-                LOGGER.info(f"   Elite archive size: {len(state.elite_archive)}")
-                LOGGER.info("=" * 60)
-        
+        if (
+            episode < config.neuroevo_warmup_episodes
+            and not state.neuroevo_warmup_complete
+        ):
+            _run_neuroevo_warmup(
+                episode, state, batch, funcs, config, env, stage, stats
+            )
+
         # ============================================================
-        # VALUE PRETRAINING: First N updates train value function only
-        # This stabilizes advantage estimates before actor learning
+        # VALUE PRETRAINING & PPO UPDATES
         # ============================================================
-        elif state.update_step < config.value_pretrain_updates:
-            # BUG-014 FIX: True value pretraining - scale down actor loss, not just entropy
-            # Create config with reduced actor loss coefficient
-            value_pretrain_config = dataclass_replace(
-                config,
-                policy_loss_coef=0.1,  # Reduce actor influence during value pretraining
-            )
-            state, metrics = _ppo_update(
-                state, batch, optimizer, funcs, value_pretrain_config, 
-                entropy_coef * 0.1  # Low entropy during value pretraining
-            )
-            if episode % 10 == 0:
-                LOGGER.info(f"  [Value Pretrain {state.update_step}/{config.value_pretrain_updates}]")
-        elif state.post_evolution_cooldown_counter > 0:
-            # POST-EVOLUTION COOLDOWN: Use reduced epochs AND LR to prevent loss spikes
-            # BUG-009 FIX: Actually apply post_evolution_lr_scale
-            # This gives Adam optimizer time to rebuild moment estimates for mutated weights
-            cooldown_config = dataclass_replace(
-                config, 
-                num_epochs=config.post_evolution_epochs,
-                learning_rate=config.learning_rate * config.post_evolution_lr_scale  # BUG-009: Apply LR scaling
-            )
-            state, metrics = _ppo_update(state, batch, optimizer, funcs, cooldown_config, entropy_coef * 0.5)
-            if episode % 5 == 0:
-                LOGGER.info(f"  [Post-Evolution Cooldown: {state.post_evolution_cooldown_counter} eps remaining, using {config.post_evolution_epochs} PPO epochs]")
         else:
-            # Normal PPO update
-            state, metrics = _ppo_update(state, batch, optimizer, funcs, config, entropy_coef)
-        
+            state, metrics = _perform_ppo_updates(
+                episode, state, batch, optimizer, funcs, config, entropy_coef
+            )
+
         # Update metrics
-        state.moving_avg_return = (1.0 - state.moving_avg_alpha) * state.moving_avg_return + state.moving_avg_alpha * stats['episode_return']
+        state.moving_avg_return = (
+            1.0 - state.moving_avg_alpha
+        ) * state.moving_avg_return + state.moving_avg_alpha * stats["episode_return"]
         # BUG-001 FIX: Track if this is a new best BEFORE updating state
-        is_new_best = stats['episode_return'] > state.best_return
+        is_new_best = stats["episode_return"] > state.best_return
         if is_new_best:
-            state.best_return = float(stats['episode_return'])
-        
+            state.best_return = float(stats["episode_return"])
+
         # Track successes
-        if stats['episode_success']:
+        if stats["episode_success"]:
             state.total_successes += 1
             state.stage_successes += 1
         state.stage_attempts += 1
-        
-        rolling_sr = state.update_rolling_success(stats['episode_success'])
-        
+
+        rolling_sr = state.update_rolling_success(stats["episode_success"])
+
+        phase_str = f"P{state.learning_phase}"
+
+        # Enhanced logging with detailed metrics
+        success_emoji = "✓" if stats["episode_success"] else "✗"
+
+        # Log every episode with basic info
+        LOGGER.info(
+            f"Ep {episode:4d} | {phase_str} | R: {stats['episode_return']:8.1f} | Steps: {stats.get('episode_length', 0):3.0f} | SR: {rolling_sr*100:4.1f}% | {stage.name} | {success_emoji}"
+        )
+
+        # Detailed metrics every 5 episodes
+        if episode % 5 == 0:
+            if "metrics" in locals() and metrics is not None:
+                actor_loss = metrics.get("actor_loss", 0.0)
+                value_loss = metrics.get("value_loss", 0.0)
+                entropy = metrics.get("entropy", 0.0)
+                kl = metrics.get("kl", 0.0)
+                pos_err = stats.get("pos_error", 0.0)
+                vel_err = stats.get("vel_error", 0.0)
+                LOGGER.info(
+                    f"         └─ Loss: {metrics.get('loss', 0.0):7.3f} | Actor: {actor_loss:6.3f} | Value: {value_loss:6.3f} | Ent: {entropy:5.2f} | KL: {kl:.4f}"
+                )
+                updates_this_ep = metrics.get("updates_this_ep", 0)
+                LOGGER.info(
+                    f"         └─ PosErr: {pos_err:5.2f}m | VelErr: {vel_err:5.2f}m/s | Best: {state.best_return:8.1f} | Updates: {state.update_step} (+{updates_this_ep})"
+                )
+
         # ============================================================
         # STAGED LEARNING: Automatic Progression Based on Success Rate
         # ============================================================
-        # Phase 1 → Phase 2: Enable RAJS at 40% success rate
-        if not state.rajs_enabled and rolling_sr >= config.rajs_enable_threshold and state.stage_attempts >= 50:
-            state.rajs_enabled = True
-            state.learning_phase = 2
-            LOGGER.info("")
-            LOGGER.info("=" * 60)
-            LOGGER.info("PHASE 2 UNLOCKED: RAJS Enabled (40% SR achieved)")
-            LOGGER.info("   Heuristic guidance will now assist learning")
-            LOGGER.info("=" * 60)
-        
-        # Phase 2 → Phase 3: Enable Evolution at 70% success rate
-        if not state.evolution_enabled and rolling_sr >= config.evolution_enable_threshold and state.stage_attempts >= 100:
-            state.evolution_enabled = True
-            state.learning_phase = 3
-            LOGGER.info("")
-            LOGGER.info("=" * 60)
-            LOGGER.info("PHASE 3 UNLOCKED: Evolution Enabled (70% SR achieved)")
-            LOGGER.info("   Neuroevolution will now explore policy mutations")
-            LOGGER.info("=" * 60)
-        
-        # Phase indicator for logging
-        phase_str = f"P{state.learning_phase}"
-        
-        # Enhanced logging with detailed metrics
-        success_emoji = "✓" if stats['episode_success'] else "✗"
-        
-        # Log every episode with basic info
-        LOGGER.info(f"Ep {episode:4d} | {phase_str} | R: {stats['episode_return']:8.1f} | Steps: {stats.get('episode_length', 0):3.0f} | SR: {rolling_sr*100:4.1f}% | {stage.name} | {success_emoji}")
-        
-        # Detailed metrics every 5 episodes
-        if episode % 5 == 0:
-            actor_loss = metrics.get('actor_loss', 0.0)
-            value_loss = metrics.get('value_loss', 0.0)
-            entropy = metrics.get('entropy', 0.0)
-            kl = metrics.get('kl', 0.0)
-            pos_err = stats.get('pos_error', 0.0)
-            vel_err = stats.get('vel_error', 0.0)
-            LOGGER.info(f"         └─ Loss: {metrics['loss']:7.3f} | Actor: {actor_loss:6.3f} | Value: {value_loss:6.3f} | Ent: {entropy:5.2f} | KL: {kl:.4f}")
-            updates_this_ep = metrics.get('updates_this_ep', 0)
-            LOGGER.info(f"         └─ PosErr: {pos_err:5.2f}m | VelErr: {vel_err:5.2f}m/s | Best: {state.best_return:8.1f} | Updates: {state.update_step} (+{updates_this_ep})")
-        
-        # Advance Curriculum
-        # STRICTER GATE: 80% SR + consecutive successes + min episodes
-        previous_stage_index = state.stage_index
-        consecutive_success_req = stage.success_episodes  # BUG-004 FIX: Use stage-specific requirement
-        recent_streak = sum(1 for s in state.recent_successes[-consecutive_success_req:] if s) if state.recent_successes else 0
-        has_streak = recent_streak >= consecutive_success_req
-        
-        # Stage 0 (Hover) requires 60% SR (lowered from 80% for achievability), other stages require 70%
-        sr_threshold = 0.60 if state.stage_index == 0 else 0.70
-        
-        if rolling_sr >= sr_threshold and state.stage_attempts >= stage.min_episodes and has_streak:
-            if state.stage_index < len(curriculum) - 1:
-                old_stage_name = curriculum[state.stage_index].name
-                state.stage_index += 1
-                state.stage_attempts = 0
-                state.stage_successes = 0
-                state.recent_successes = []
-                new_stage = curriculum[state.stage_index]
-                LOGGER.info(f"")
-                LOGGER.info(f"STAGE UP! {old_stage_name} -> {new_stage.name}")
-                LOGGER.info(f"   New altitude: {new_stage.initial_position[2]:.0f}m | Target SR: {sr_threshold*100:.0f}%")
-                
-                # STAGED EXPLORATION RESET: Boost entropy on stage transition for renewed exploration
-                if config.staged_exploration_reset > 0:
-                    old_entropy = entropy_coef
-                    entropy_coef = config.entropy_coef * config.staged_exploration_reset
-        
-        # Decay entropy (only if stage didn't just advance)
-        if state.stage_index == previous_stage_index:
-            entropy_coef *= config.entropy_coef_decay
-        
+        entropy_coef = _handle_stage_progression(
+            episode, state, rolling_sr, curriculum, stage, config, entropy_coef
+        )
+
         # ============================================================
         # EVOLUTION: Safe Mutation through Gradients (SM-G) for GRU
         # ============================================================
-        # Skip evolution during: warmup, stage lockout period, or not on interval
         stage_episodes_since_advance = state.stage_attempts
-        # STAGED LEARNING: Only run evolution when enabled (Phase 3) or config override
         evolution_ready = (
-            (config.use_evolution or state.evolution_enabled) 
-            and episode > config.evolution_warmup_episodes 
+            (config.use_evolution or state.evolution_enabled)
+            and episode > config.evolution_warmup_episodes
             and episode % config.evolution_interval == 0
             and stage_episodes_since_advance > config.evolution_stage_lockout
         )
         if evolution_ready:
-            from .policies import safe_mutate_parameters_smg, crossover_parameters
-            
-            # Create sample data for sensitivity computation
-            # sample_obs shape: [SeqLen, Features] -> [1, SeqLen, Features]
-            sample_obs = batch["observations"][:config.sequence_length]
-            sample_obs = sample_obs.reshape(1, sample_obs.shape[0], sample_obs.shape[1])  # Explicit reshape
-            gru_dim = config.policy_config.gru_hidden_dim
-            sample_hidden = jnp.zeros((1, gru_dim))  # GRU single state
-            
-            # Use rolling fitness for stable comparison (AS Rocketry-inspired)
-            rolling_parent_fitness = state.get_rolling_parent_fitness()
-            current_episode_fitness = stats['episode_return']
-            
-            # Generate mutant candidates using SM-G + Elite Crossover
-            best_params = state.params
-            best_fitness = current_episode_fitness
-            
-            # ADAPTIVE MUTATION: Start with smaller mutations, ramp up over training
-            # This prevents evolution from disrupting early learning
-            episode_progress = min(episode / total_episodes, 1.0)
-            adaptive_mutation_scale = config.mutation_scale * (0.3 + 0.7 * episode_progress)
-            # Early (ep 0): 30% mutation, Late (ep 1000): 100% mutation
-            
-            for candidate_idx in range(config.evolution_candidates):
-                state.rng, mut_key, cross_key, select_key = jax.random.split(state.rng, 4)
-                
-                # ELITE CROSSOVER: Optionally combine with elite before mutation
-                parent = state.params
-                crossover_used = False
-                if config.use_elite_crossover and len(state.elite_archive) > 0:
-                    if float(jax.random.uniform(select_key)) < config.crossover_probability:
-                        # Select random elite from top performers
-                        elite_idx = int(jax.random.randint(select_key, (), 0, len(state.elite_archive)))
-                        _, elite_params = state.elite_archive[elite_idx]
-                        parent = crossover_parameters(cross_key, state.params, elite_params, 0.5)
-                        crossover_used = True
-                
-                # Safe mutation - scales mutation inversely to output sensitivity
-                mutant_params = safe_mutate_parameters_smg(
-                    mut_key,
-                    parent,
-                    funcs,
-                    sample_obs,  # Already [1, SeqLen, Features]
-                    sample_hidden,
-                    scale=adaptive_mutation_scale,  # Use adaptive scale
-                )
-                
-                # Evaluate mutant with more episodes for stable estimate
-                mutant_fitness = _evaluate_candidate(
-                    env, stage, mutant_params, funcs, state.obs_rms, config,
-                    num_episodes=config.evolution_eval_episodes
-                )
-                
-                if mutant_fitness > best_fitness:
-                    best_fitness = mutant_fitness
-                    best_params = mutant_params
-                    cross_str = " (crossover)" if crossover_used else ""
-                    LOGGER.info(f"  Evolution: Candidate {candidate_idx}{cross_str} improved! R: {mutant_fitness:.1f}")
-            
-            # Accept best if improved vs rolling average (more stable than single episode)
-            # Compare against rolling average if available, else use current episode
-            comparison_fitness = rolling_parent_fitness if rolling_parent_fitness > -float('inf') else current_episode_fitness
-            improvement_ratio = best_fitness / max(abs(comparison_fitness), 1.0)
-            meets_threshold = improvement_ratio >= config.fitness_improvement_threshold
-            
-            if best_params is not state.params and meets_threshold:
-                state.params = best_params
-                
-                # ADD TO ELITE ARCHIVE (AS Rocketry-inspired population diversity)
-                added_to_elite = state.update_elite_archive(best_fitness, best_params)
-                elite_str = " [added to elite archive]" if added_to_elite else ""
-                
-                LOGGER.info(f"  Evolution: Accepted mutant with R: {best_fitness:.1f} ({improvement_ratio:.1%} vs rolling avg){elite_str}")
-                
-                # RESEARCH-BASED FIX: Activate post-evolution cooldown
-                # This uses reduced PPO epochs and learning rate for the next N episodes
-                # to prevent gradient explosion after weight mutation
-                state.post_evolution_cooldown_counter = config.post_evolution_cooldown
-                LOGGER.info(f"  Evolution: Cooldown activated for {config.post_evolution_cooldown} episodes")
-                
-                # Soft optimizer reset preserving partial momentum
-                LOGGER.info(f"  Evolution: Soft optimizer reset (keeping {config.soft_reset_momentum_keep*100:.0f}% momentum)")
-                new_opt_state = optimizer.init(state.params)
-                
-                # Blend old and new optimizer states (preserve partial momentum)
-                def blend_opt_states(old, new):
-                    if isinstance(old, jnp.ndarray) and isinstance(new, jnp.ndarray):
-                        if old.shape == new.shape:
-                            return config.soft_reset_momentum_keep * old + (1 - config.soft_reset_momentum_keep) * new
-                    return new
-                
-                try:
-                    state.opt_state = jax.tree_util.tree_map(blend_opt_states, state.opt_state, new_opt_state)
-                except:
-                    # Fallback to full reset if blending fails
-                    state.opt_state = new_opt_state
-            elif best_params is not state.params:
-                LOGGER.info(f"  Evolution: Rejected mutant (improvement {improvement_ratio:.1%} < threshold {config.fitness_improvement_threshold:.0%})")
-        
+            _run_evolution_step(
+                episode,
+                total_episodes,
+                state,
+                batch,
+                stats,
+                funcs,
+                config,
+                env,
+                stage,
+                optimizer,
+            )
+
         # Update rolling parent fitness for next comparison
-        state.update_parent_fitness(stats['episode_return'])
-        
+        state.update_parent_fitness(stats["episode_return"])
+
         # Decrement cooldown counter each episode
         if state.post_evolution_cooldown_counter > 0:
             state.post_evolution_cooldown_counter -= 1
-        
+
         # ============================================================
         # CHECKPOINTING: Save model periodically and on best
         # ============================================================
         state.history.append(log_entry)
-        
+
         # Save checkpoint at intervals
         if output_dir and episode > 0 and episode % config.checkpoint_interval == 0:
-            save_checkpoint(state, config, episode, output_dir, is_best=False, training_logs=state.history)
-        
+            save_checkpoint(
+                state,
+                config,
+                episode,
+                output_dir,
+                is_best=False,
+                training_logs=state.history,
+            )
+
         # Save best model - BUG-001 FIX: Use is_new_best from earlier check
         if config.save_best and is_new_best:
             if output_dir:
-                save_checkpoint(state, config, episode, output_dir, is_best=True, training_logs=state.history)
-        
+                save_checkpoint(
+                    state,
+                    config,
+                    episode,
+                    output_dir,
+                    is_best=True,
+                    training_logs=state.history,
+                )
+
     # Final save
     if output_dir:
         LOGGER.info("Saving final checkpoint...")
-        save_checkpoint(state, config, total_episodes, output_dir, is_best=False, training_logs=state.history)
-    
+        save_checkpoint(
+            state,
+            config,
+            total_episodes,
+            output_dir,
+            is_best=False,
+            training_logs=state.history,
+        )
+
     # Cleanup viewer to prevent GLFW errors
     if viewer is not None:
         try:
             viewer.close()
         except Exception as e:
             LOGGER.debug(f"Viewer cleanup: {e}")
-    
+
     return state
-
-
-
