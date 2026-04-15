@@ -1,7 +1,5 @@
 """Reverse Curriculum for accelerating landing learning."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import List, Tuple
 
