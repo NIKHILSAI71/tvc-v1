@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Tuple
 
 import jax.numpy as jnp
@@ -31,174 +33,43 @@ class CurriculumStage:
     min_episodes: int = 0
 
 
-def build_curriculum() -> List[CurriculumStage]:
-    """Build REVERSE curriculum: Hover first, then land from increasing heights.
+def build_curriculum(config_path: Path | None = None) -> List[CurriculumStage]:
+    """Build REVERSE curriculum from configuration: Hover first, then land from increasing heights.
     
     CRITICAL: Each stage must be MASTERED before advancing.
     Stage 0 (Hover) teaches basic stabilization - foundation for all later skills.
     """
-
-    # ============================================================
-    # STAGE 0: HOVER MASTERY - Foundation skill
-    # Goal: Learn to maintain position and orientation at low altitude
-    # This prevents the model from learning to "fall with style"
-    # ============================================================
-    hover_stage = CurriculumStage(
-        name="hover_stabilization",  # BUG-003 FIX: Consistent with env.py stage checks
-        episodes=400,
-        target_position=(0.0, 0.0, 3.0),
-        target_orientation=(1.0, 0.0, 0.0, 0.0),
-        target_velocity=(0.0, 0.0, 0.0),
-        target_angular_velocity=(0.0, 0.0, 0.0),
+    if config_path is None:
+        config_path = Path(__file__).parent / "curriculum.json"
         
-        # PHASE 1: Very easy initial conditions for pure PPO
-        initial_position=(0.0, 0.0, 3.2),  # Start very close to target
-        initial_velocity=(0.0, 0.0, -0.05),  # Almost no initial velocity
-        initial_orientation=(1.0, 0.0, 0.0, 0.0),
-        initial_angular_velocity=(0.0, 0.0, 0.0),
+    with open(config_path, "r") as f:
+        stages_data = json.load(f)
         
-        # PHASE 1: Very wide tolerances for easy success
-        position_tolerance=2.5,   # Very easy (was 1.2)
-        velocity_tolerance=1.5,   # Very easy (was 0.6)
-        orientation_tolerance=0.3,  # ~17 degrees max tilt
-        angular_velocity_tolerance=0.5,
-        tolerance_bonus=0.5,
-        success_episodes=3,   # Low bar for progression
-        min_episodes=50       # Short warmup before advancement
-    )
-
-    # ============================================================
-    # STAGE 1: Easy Descent - 5 meters
-    # Goal: Learn controlled descent and soft touchdown
-    # Tighter tolerances than before to ensure real mastery
-    # ============================================================
-    touchdown_stage = CurriculumStage(
-        name="5m Easy",
-        episodes=350,
-        target_position=(0.0, 0.0, 1.0),  # Land on pad
-        target_orientation=(1.0, 0.0, 0.0, 0.0),
-        target_velocity=(0.0, 0.0, -0.3),  # Softer touch than before
-        target_angular_velocity=(0.0, 0.0, 0.0),
+    stages = []
+    for data in stages_data:
+        # Convert lists to tuples for the CurriculumStage initialization
+        stage = CurriculumStage(
+            name=data["name"],
+            episodes=data["episodes"],
+            target_position=tuple(data["target_position"]),
+            target_orientation=tuple(data["target_orientation"]),
+            target_velocity=tuple(data["target_velocity"]),
+            target_angular_velocity=tuple(data["target_angular_velocity"]),
+            initial_position=tuple(data["initial_position"]),
+            initial_velocity=tuple(data["initial_velocity"]),
+            initial_orientation=tuple(data["initial_orientation"]),
+            initial_angular_velocity=tuple(data["initial_angular_velocity"]),
+            position_tolerance=data["position_tolerance"],
+            velocity_tolerance=data["velocity_tolerance"],
+            orientation_tolerance=data["orientation_tolerance"],
+            angular_velocity_tolerance=data["angular_velocity_tolerance"],
+            tolerance_bonus=data["tolerance_bonus"],
+            success_episodes=data["success_episodes"],
+            min_episodes=data["min_episodes"],
+        )
+        stages.append(stage)
         
-        initial_position=(0.0, 0.0, 5.0),  # 5m altitude
-        initial_velocity=(0.0, 0.0, -0.8),  # Gentler initial descent
-        initial_orientation=(1.0, 0.0, 0.0, 0.0),
-        initial_angular_velocity=(0.0, 0.0, 0.0),
-        
-        position_tolerance=1.5,   # Tighter than before (was 2.0)
-        velocity_tolerance=0.6,   # Must land softly (was 1.0)
-        orientation_tolerance=0.2,  # ~11 deg (was 0.3)
-        angular_velocity_tolerance=0.4,  # Less wobble (was 0.5)
-        tolerance_bonus=0.6,
-        success_episodes=8,   # More consistent success needed (was 5)
-        min_episodes=120      # More training required (was 50)
-    )
-
-    # ============================================================
-    # STAGE 2: Medium Descent - 10 meters
-    # Bridges the difficulty gap with stricter requirements
-    # ============================================================
-    intermediate_hop_stage = CurriculumStage(
-        name="10m Medium",
-        episodes=300,
-        target_position=(0.0, 0.0, 1.0),
-        target_orientation=(1.0, 0.0, 0.0, 0.0),
-        target_velocity=(0.0, 0.0, -0.3),
-        target_angular_velocity=(0.0, 0.0, 0.0),
-        
-        initial_position=(0.0, 0.0, 10.0),
-        initial_velocity=(0.0, 0.0, -1.2),  # Moderate descent
-        initial_orientation=(1.0, 0.0, 0.0, 0.0),
-        initial_angular_velocity=(0.0, 0.0, 0.0),
-        
-        position_tolerance=1.2,
-        velocity_tolerance=0.5,
-        orientation_tolerance=0.18,
-        angular_velocity_tolerance=0.35,
-        tolerance_bonus=0.65,
-        success_episodes=8,
-        min_episodes=100
-    )
-
-    # ============================================================
-    # STAGE 3: Hard Descent - 15 meters
-    # Must control faster descent, requires good timing
-    # ============================================================
-    short_hop_stage = CurriculumStage(
-        name="15m Hard",
-        episodes=350,
-        target_position=(0.0, 0.0, 1.0),
-        target_orientation=(1.0, 0.0, 0.0, 0.0),
-        target_velocity=(0.0, 0.0, -0.3),
-        target_angular_velocity=(0.0, 0.0, 0.0),
-        
-        initial_position=(0.0, 0.0, 15.0),
-        initial_velocity=(0.0, 0.0, -1.8),
-        initial_orientation=(1.0, 0.0, 0.0, 0.0),
-        initial_angular_velocity=(0.0, 0.0, 0.0),
-        
-        position_tolerance=1.0,
-        velocity_tolerance=0.5,
-        orientation_tolerance=0.15,
-        angular_velocity_tolerance=0.3,
-        tolerance_bonus=0.7,
-        success_episodes=8,
-        min_episodes=120
-    )
-
-    # ============================================================
-    # STAGE 4: High Altitude Pro - 40 meters
-    # Fast falling, requires excellent control and timing
-    # ============================================================
-    high_descent_stage = CurriculumStage(
-        name="40m Pro",
-        episodes=400,
-        target_position=(0.0, 0.0, 1.0),
-        target_orientation=(1.0, 0.0, 0.0, 0.0),
-        target_velocity=(0.0, 0.0, -0.3),
-        target_angular_velocity=(0.0, 0.0, 0.0),
-        
-        initial_position=(0.0, 0.0, 40.0),
-        initial_velocity=(0.0, 0.0, -4.0),  # Fast descent
-        initial_orientation=(1.0, 0.0, 0.0, 0.0),
-        initial_angular_velocity=(0.0, 0.0, 0.0),
-        
-        position_tolerance=1.0,
-        velocity_tolerance=0.4,
-        orientation_tolerance=0.12,
-        angular_velocity_tolerance=0.25,
-        tolerance_bonus=0.85,
-        success_episodes=10,
-        min_episodes=150
-    )
-    
-    # ============================================================
-    # STAGE 5: Expert with Lateral Offset - Hardest
-    # Start high with lateral offset - requires angled descent
-    # ============================================================
-    expert_stage = CurriculumStage(
-        name="40m Expert",
-        episodes=500,
-        target_position=(0.0, 0.0, 1.0),
-        target_orientation=(1.0, 0.0, 0.0, 0.0),
-        target_velocity=(0.0, 0.0, -0.2),
-        target_angular_velocity=(0.0, 0.0, 0.0),
-        
-        initial_position=(8.0, 0.0, 40.0),  # 8m lateral offset
-        initial_velocity=(0.0, 0.0, -2.0),
-        initial_orientation=(1.0, 0.0, 0.0, 0.0),
-        initial_angular_velocity=(0.0, 0.0, 0.0),
-        
-        position_tolerance=0.5,
-        velocity_tolerance=0.3,
-        orientation_tolerance=0.1,
-        angular_velocity_tolerance=0.2,
-        tolerance_bonus=1.0,
-        success_episodes=15,  # Very consistent success needed
-        min_episodes=150
-    )
-
-    return [hover_stage, touchdown_stage, intermediate_hop_stage, short_hop_stage, high_descent_stage, expert_stage]
+    return stages
 
 
 def select_stage(curriculum: List[CurriculumStage], episode: int) -> CurriculumStage:
