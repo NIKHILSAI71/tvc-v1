@@ -10,11 +10,9 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import pickle
-import sys
 import time
-from dataclasses import dataclass, field, asdict, replace as dataclass_replace  # BUG-012 FIX: Import replace at module level
+from dataclasses import dataclass, field, replace as dataclass_replace  # BUG-012 FIX: Import replace at module level
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -25,13 +23,11 @@ import jax.numpy as jnp
 import mujoco.viewer
 import numpy as np
 import optax
-from flax import serialization
-from jax import Array
 
 from .curriculum import CurriculumStage, build_curriculum
 from .dynamics import RocketParams
 from .env import TvcEnv
-from .policies import PolicyConfig, PolicyFunctions, build_policy_network, mutate_parameters
+from .policies import PolicyConfig, PolicyFunctions, build_policy_network
 
 LOGGER = logging.getLogger(__name__)
 
