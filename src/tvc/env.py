@@ -102,7 +102,10 @@ class TvcEnv:
         }
 
         self._actuator_ids: Dict[str, int] = {}
-        self._resolve_actuators()
+        self._joint_ids: Dict[str, int] = {}
+        self._plume_ids: Dict[str, int] = {}
+        self._vehicle_id = -1
+        self._resolve_ids()
         mujoco.mj_forward(self.model, self.data)
 
     @property
@@ -110,8 +113,9 @@ class TvcEnv:
         """Get control limit."""
         return self._ctrl_limit
 
-    def _resolve_actuators(self) -> None:
-        """Find actuator IDs."""
+    def _resolve_ids(self) -> None:
+        """Cache all necessary MuJoCo IDs to avoid costly string lookups in hot paths."""
+        # Resolve actuators
         self._actuator_ids = {}
         for key in ("tvc_pitch", "tvc_yaw", "thrust_control"):
             try:
@@ -119,6 +123,27 @@ class TvcEnv:
                 self._actuator_ids[key] = idx
             except Exception:
                 self._actuator_ids[key] = -1
+
+        # Resolve body IDs
+        self._vehicle_id = int(mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "vehicle"))
+
+        # Resolve joint IDs
+        self._joint_ids = {}
+        for key in ("tvc_x", "tvc_y"):
+            try:
+                idx = int(mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, key))
+                self._joint_ids[key] = idx
+            except Exception:
+                self._joint_ids[key] = -1
+
+        # Resolve plume geometry IDs
+        self._plume_ids = {}
+        for key in ("short", "medium", "long", "outer"):
+            try:
+                idx = int(mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, f"plume_{key}"))
+                self._plume_ids[key] = idx
+            except Exception:
+                self._plume_ids[key] = -1
 
     def configure_stage(self, stage) -> None:
         """Apply curriculum stage configuration."""
@@ -145,10 +170,9 @@ class TvcEnv:
         if params is None:
             return
 
-        vehicle_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "vehicle")
-        if vehicle_id >= 0:
-            self.model.body_mass[vehicle_id] = params.mass
-            self.model.body_inertia[vehicle_id] = np.array([
+        if self._vehicle_id >= 0:
+            self.model.body_mass[self._vehicle_id] = params.mass
+            self.model.body_inertia[self._vehicle_id] = np.array([
                 max(params.inertia[0], 1e-3),
                 max(params.inertia[1], 1e-3),
                 max(params.inertia[2], 1e-3),
@@ -157,7 +181,7 @@ class TvcEnv:
         self.model.opt.gravity[:] = [0.0, 0.0, -params.gravity]
 
         for joint in ("tvc_x", "tvc_y"):
-            joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, joint)
+            joint_id = self._joint_ids.get(joint, -1)
             if joint_id >= 0:
                 self.model.jnt_range[joint_id] = [-params.tvc_limit, params.tvc_limit]
 
@@ -176,14 +200,13 @@ class TvcEnv:
         if enable_randomization:
             # Mass variation: ±20% (Increased from 10% for fuel usage simulation)
             mass_factor = self._rng.uniform(0.8, 1.2)
-            vehicle_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "vehicle")
-            if vehicle_id >= 0:
-                self.model.body_mass[vehicle_id] = self._base_mass * mass_factor
+            if self._vehicle_id >= 0:
+                self.model.body_mass[self._vehicle_id] = self._base_mass * mass_factor
 
             # Inertia variation: ±20%
             inertia_factor = self._rng.uniform(0.8, 1.2, 3)
-            if vehicle_id >= 0:
-                self.model.body_inertia[vehicle_id] = self._base_inertia * inertia_factor
+            if self._vehicle_id >= 0:
+                self.model.body_inertia[self._vehicle_id] = self._base_inertia * inertia_factor
                 
             # CRITICAL: Center of Mass (CoM) offset optimization
             # Real rockets have shifting CoM. Add random offset ±5cm
@@ -332,9 +355,8 @@ class TvcEnv:
         for _ in range(self.frame_skip):
             # Apply wind disturbance force if domain randomization enabled
             if self._domain_randomization and hasattr(self, '_wind_force'):
-                vehicle_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "vehicle")
-                if vehicle_id >= 0:
-                    self.data.xfrc_applied[vehicle_id, 0:3] = self._wind_force
+                if self._vehicle_id >= 0:
+                    self.data.xfrc_applied[self._vehicle_id, 0:3] = self._wind_force
 
             mujoco.mj_step(self.model, self.data)
 
@@ -676,45 +698,37 @@ class TvcEnv:
     def _update_thrust_plume(self, thrust_fraction: float) -> None:
         """Dynamically visualize thrust plume using multi-layer fade based on thrust magnitude."""
         try:
-            # Find the multi-layer plume geometries
-            plume_ids = {
-                'short': mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "plume_short"),
-                'medium': mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "plume_medium"),
-                'long': mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "plume_long"),
-                'outer': mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "plume_outer"),
-            }
-            
             if thrust_fraction < 0.05:
                 # No thrust - hide all plumes
-                for geom_id in plume_ids.values():
+                for geom_id in self._plume_ids.values():
                     if geom_id >= 0:
                         self.data.geom_rgba[geom_id, 3] = 0.0  # Set alpha to 0
             else:
                 # Short plume: Always visible when thrust > 5%
-                if plume_ids['short'] >= 0:
+                if self._plume_ids.get('short', -1) >= 0:
                     alpha = min(1.0, thrust_fraction * 3.0)  # Full brightness at 33% thrust
-                    self.data.geom_rgba[plume_ids['short']] = [0.98, 0.5, 0.1, 0.8 * alpha]
+                    self.data.geom_rgba[self._plume_ids['short']] = [0.98, 0.5, 0.1, 0.8 * alpha]
                 
                 # Medium plume: Visible from 30% thrust
-                if plume_ids['medium'] >= 0:
+                if self._plume_ids.get('medium', -1) >= 0:
                     if thrust_fraction >= 0.3:
                         alpha = min(1.0, (thrust_fraction - 0.3) * 2.5)
-                        self.data.geom_rgba[plume_ids['medium']] = [0.98, 0.5, 0.1, 0.7 * alpha]
+                        self.data.geom_rgba[self._plume_ids['medium']] = [0.98, 0.5, 0.1, 0.7 * alpha]
                     else:
-                        self.data.geom_rgba[plume_ids['medium'], 3] = 0.0
+                        self.data.geom_rgba[self._plume_ids['medium'], 3] = 0.0
                 
                 # Long plume: Visible from 60% thrust
-                if plume_ids['long'] >= 0:
+                if self._plume_ids.get('long', -1) >= 0:
                     if thrust_fraction >= 0.6:
                         alpha = min(1.0, (thrust_fraction - 0.6) * 2.5)
-                        self.data.geom_rgba[plume_ids['long']] = [0.98, 0.5, 0.1, 0.6 * alpha]
+                        self.data.geom_rgba[self._plume_ids['long']] = [0.98, 0.5, 0.1, 0.6 * alpha]
                     else:
-                        self.data.geom_rgba[plume_ids['long'], 3] = 0.0
+                        self.data.geom_rgba[self._plume_ids['long'], 3] = 0.0
                 
                 # Outer dispersed plume: Always visible with thrust, scales with amount
-                if plume_ids['outer'] >= 0:
+                if self._plume_ids.get('outer', -1) >= 0:
                     alpha = thrust_fraction * 0.8  # Max 80% opacity
-                    self.data.geom_rgba[plume_ids['outer']] = [0.9, 0.4, 0.05, 0.3 * alpha]
+                    self.data.geom_rgba[self._plume_ids['outer']] = [0.9, 0.4, 0.05, 0.3 * alpha]
                     
         except Exception:
             # Silently ignore if geometries not found
