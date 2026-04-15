@@ -9,7 +9,7 @@ Last Updated: 2026-01-03
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Tuple, cast
+from typing import Any, Callable, Tuple, cast
 from typing import Protocol
 
 import flax.linen as nn
