@@ -1,0 +1,320 @@
+[
+  {
+    "name": "hover_stabilization",
+    "episodes": 400,
+    "target_position": [
+      0.0,
+      0.0,
+      3.0
+    ],
+    "target_orientation": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "target_velocity": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "target_angular_velocity": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "initial_position": [
+      0.0,
+      0.0,
+      3.2
+    ],
+    "initial_velocity": [
+      0.0,
+      0.0,
+      -0.05
+    ],
+    "initial_orientation": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "initial_angular_velocity": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "position_tolerance": 2.5,
+    "velocity_tolerance": 1.5,
+    "orientation_tolerance": 0.3,
+    "angular_velocity_tolerance": 0.5,
+    "tolerance_bonus": 0.5,
+    "success_episodes": 3,
+    "min_episodes": 50
+  },
+  {
+    "name": "5m Easy",
+    "episodes": 350,
+    "target_position": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "target_orientation": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "target_velocity": [
+      0.0,
+      0.0,
+      -0.3
+    ],
+    "target_angular_velocity": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "initial_position": [
+      0.0,
+      0.0,
+      5.0
+    ],
+    "initial_velocity": [
+      0.0,
+      0.0,
+      -0.8
+    ],
+    "initial_orientation": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "initial_angular_velocity": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "position_tolerance": 1.5,
+    "velocity_tolerance": 0.6,
+    "orientation_tolerance": 0.2,
+    "angular_velocity_tolerance": 0.4,
+    "tolerance_bonus": 0.6,
+    "success_episodes": 8,
+    "min_episodes": 120
+  },
+  {
+    "name": "10m Medium",
+    "episodes": 300,
+    "target_position": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "target_orientation": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "target_velocity": [
+      0.0,
+      0.0,
+      -0.3
+    ],
+    "target_angular_velocity": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "initial_position": [
+      0.0,
+      0.0,
+      10.0
+    ],
+    "initial_velocity": [
+      0.0,
+      0.0,
+      -1.2
+    ],
+    "initial_orientation": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "initial_angular_velocity": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "position_tolerance": 1.2,
+    "velocity_tolerance": 0.5,
+    "orientation_tolerance": 0.18,
+    "angular_velocity_tolerance": 0.35,
+    "tolerance_bonus": 0.65,
+    "success_episodes": 8,
+    "min_episodes": 100
+  },
+  {
+    "name": "15m Hard",
+    "episodes": 350,
+    "target_position": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "target_orientation": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "target_velocity": [
+      0.0,
+      0.0,
+      -0.3
+    ],
+    "target_angular_velocity": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "initial_position": [
+      0.0,
+      0.0,
+      15.0
+    ],
+    "initial_velocity": [
+      0.0,
+      0.0,
+      -1.8
+    ],
+    "initial_orientation": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "initial_angular_velocity": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "position_tolerance": 1.0,
+    "velocity_tolerance": 0.5,
+    "orientation_tolerance": 0.15,
+    "angular_velocity_tolerance": 0.3,
+    "tolerance_bonus": 0.7,
+    "success_episodes": 8,
+    "min_episodes": 120
+  },
+  {
+    "name": "40m Pro",
+    "episodes": 400,
+    "target_position": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "target_orientation": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "target_velocity": [
+      0.0,
+      0.0,
+      -0.3
+    ],
+    "target_angular_velocity": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "initial_position": [
+      0.0,
+      0.0,
+      40.0
+    ],
+    "initial_velocity": [
+      0.0,
+      0.0,
+      -4.0
+    ],
+    "initial_orientation": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "initial_angular_velocity": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "position_tolerance": 1.0,
+    "velocity_tolerance": 0.4,
+    "orientation_tolerance": 0.12,
+    "angular_velocity_tolerance": 0.25,
+    "tolerance_bonus": 0.85,
+    "success_episodes": 10,
+    "min_episodes": 150
+  },
+  {
+    "name": "40m Expert",
+    "episodes": 500,
+    "target_position": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "target_orientation": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "target_velocity": [
+      0.0,
+      0.0,
+      -0.2
+    ],
+    "target_angular_velocity": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "initial_position": [
+      8.0,
+      0.0,
+      40.0
+    ],
+    "initial_velocity": [
+      0.0,
+      0.0,
+      -2.0
+    ],
+    "initial_orientation": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "initial_angular_velocity": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "position_tolerance": 0.5,
+    "velocity_tolerance": 0.3,
+    "orientation_tolerance": 0.1,
+    "angular_velocity_tolerance": 0.2,
+    "tolerance_bonus": 1.0,
+    "success_episodes": 15,
+    "min_episodes": 150
+  }
+]
